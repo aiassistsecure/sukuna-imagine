@@ -180,10 +180,21 @@ fixture of mine on the very first run — the gate was right and my test was wro
 |---|---|
 | 🟢 Execution gate (L0–L4) | **built · 39/39 on live PostgreSQL 16** |
 | 🟢 Sentinel envelope | **built · fixture-proven** |
-| 🟡 Schema catalog | in progress |
-| 🟡 Parallel corpus forge | in progress |
-| ⚪ Training harness (A6000) | designed |
-| ⚪ Base-model bake-off | next |
+| 🟢 Schema catalog | **5 schemas, adversarial by design** |
+| 🟢 Parallel corpus forge | **built · 2,027 candidates/sec on 2 cores · 19/19 poison fixtures** |
+| 🟢 Execution-accuracy eval | **built · 4/4 directions verified (oracle 100%, saboteur 0%)** |
+| 🟢 Training harness (A6000) | **built · bf16 · packed · FlashAttention-2 · full FT default** |
+| ⚪ Base-model bake-off | next — one afternoon, decides everything downstream |
+
+### One command
+
+```bash
+BASE=<hf-id-or-path> ./scripts/run_a6000.sh
+```
+
+Gate self-test → forge corpus → build held-out eval → **baseline the base model
+before training it** → train → re-evaluate. Step 3 is not optional: without a
+before-number, an after-number means nothing.
 
 ---
 
@@ -214,8 +225,15 @@ On the previous model, two fine-tune runs moved the target metric by **zero**. O
 redesign moved it by **four**. Training is the last resort, not the first instinct.
 
 **4 · Schema goes in the prompt, not in the weights.**
-The model must learn *"read the schema you were handed"* — not memorise ours. Train on one
-schema and you ship a model that only works on your database. That is a demo, not a product.
+The model must learn *"read the schema you were handed"* — not memorise ours. The catalog is
+adversarial on purpose: the same concept under different names (`orders` / `appointments` /
+`routes`), the same name meaning different things (`total` is money in one schema and a
+package **count** in another), camelCase, quoted `"Mixed Case"`, reserved words like `order`
+that must be quoted, nullable columns so `count(col) != count(*)` is real, and a table with
+zero rows so "no results" is a trained-for answer.
+
+`telemetry` is **held out entirely.** The gap between trained-schema accuracy and held-out
+accuracy *is* the memorisation gap, and it is printed on every eval run.
 
 ---
 

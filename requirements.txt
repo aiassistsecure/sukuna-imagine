@@ -1,0 +1,12 @@
+# gate + forge (CPU box; no GPU needed)
+psycopg2-binary>=2.9
+pglast>=8.0            # libpg_query — PostgreSQL's REAL parser
+
+# training + eval (A6000 box)
+torch>=2.4
+transformers>=5.0
+accelerate>=1.0
+peft>=0.13             # only needed with --lora
+datasets>=3.0
+# optional, big throughput win on Ampere:
+# flash-attn>=2.6 --no-build-isolation
