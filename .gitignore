@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+pgdata/
+pgrun/
+corpus/*.jsonl
+runs/
+*.gguf
+*.safetensors

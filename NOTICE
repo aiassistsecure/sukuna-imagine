@@ -1,0 +1,14 @@
+sukuna-imagine / stealth
+Copyright (c) 2026 Interchained LLC
+
+This project uses, but does not vendor, the following:
+
+  PostgreSQL          — the execution gate's parser, planner and executor.
+                        PostgreSQL License. https://www.postgresql.org/
+  pglast / libpg_query— Python bindings over PostgreSQL's real SQL parser.
+                        https://github.com/lelit/pglast
+  psycopg2            — PostgreSQL driver. LGPL-3.0.
+
+Model weights, when published, ship under the licence of whatever base model
+they derive from, with upstream attribution preserved in the artifact metadata
+and recorded here. No weights are published in this repository.
