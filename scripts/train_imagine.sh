@@ -1,19 +1,36 @@
 #!/usr/bin/env bash
-# Build Imagine v1 from a LOCAL DeepSeek-Coder-1.3B-Instruct checkpoint.
+# Build or continue Imagine v1 from LOCAL checkpoints only.
 set -euo pipefail
 
-STUDENT="${STUDENT:-/sukuna-imagine/models/deepseek-coder-1.3b-instruct}"
+BASE="${BASE:-/sukuna-imagine/models/deepseek-coder-1.3b-instruct}"
 CORPUS="${CORPUS:-corpus/imagine_train.jsonl}"
 OUT="${OUT:-runs/imagine-deepseek13-v1}"
+RESET="${RESET:-0}"
+
+if [[ "$RESET" == "1" ]]; then
+  STUDENT="$BASE"
+  MODE="reset-from-base"
+elif [[ -d "$OUT/final" ]]; then
+  STUDENT="$OUT/final"
+  MODE="continue-from-imagine"
+else
+  STUDENT="$BASE"
+  MODE="first-run-from-base"
+fi
 
 if [[ ! -d "$STUDENT" ]]; then
   echo "ERROR: local student model not found: $STUDENT" >&2
-  echo "Stage deepseek-ai/deepseek-coder-1.3b-instruct there first, then rerun." >&2
+  echo "Expected staged base at: $BASE" >&2
   exit 2
 fi
 
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+
+echo "Imagine training mode: $MODE"
+echo "Input checkpoint:      $STUDENT"
+echo "Output checkpoint:     $OUT/final"
+echo "Corpus:                $CORPUS"
 
 python -m stealth.train \
   --model "$STUDENT" \
@@ -28,3 +45,5 @@ python -m stealth.train \
   --grad-ckpt
 
 echo "Imagine checkpoint -> $OUT/final"
+echo "Next run will continue from this checkpoint automatically."
+echo "Use RESET=1 bash scripts/train_imagine.sh to restart from the staged base."
