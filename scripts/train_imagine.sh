@@ -31,17 +31,22 @@ echo "Imagine training mode: $MODE"
 echo "Input checkpoint:      $STUDENT"
 echo "Output checkpoint:     $OUT/final"
 echo "Corpus:                $CORPUS"
+echo "Learning rate:         ${LR:-5e-6}"
+echo "Epochs:                ${EPOCHS:-1}"
+echo "LoRA rank:             ${LORA:-16}"
 
 python -m stealth.train \
   --model "$STUDENT" \
   --corpus "$CORPUS" \
   --out "$OUT" \
-  --epochs "${EPOCHS:-4}" \
+  --lr "${LR:-5e-6}" \
+  --epochs "${EPOCHS:-1}" \
   --batch "${BATCH:-2}" \
   --accum "${ACCUM:-4}" \
   --seq-len "${SEQ_LEN:-1024}" \
   --max-len "${MAX_LEN:-1024}" \
   --save-every "${SAVE_EVERY:-100}" \
+  --lora "${LORA:-16}" \
   --grad-ckpt
 
 echo "Imagine checkpoint -> $OUT/final"
