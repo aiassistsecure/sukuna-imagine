@@ -245,7 +245,7 @@ def main() -> int:
             pass
     print(f"  {_green('attention')} {attn}")
 
-    tok = AutoTokenizer.from_pretrained(a.model)
+    tok = AutoTokenizer.from_pretrained(a.model, use_fast=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
@@ -253,6 +253,9 @@ def main() -> int:
     probe_ids = tok.encode(probe, add_special_tokens=False)
     probe_decoded = tok.decode(probe_ids, skip_special_tokens=True)
     print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
+    if not tok.is_fast:
+        print(_red("FATAL: fast tokenizer required; slow tokenizer would corrupt whitespace"))
+        return 6
     if probe_decoded != probe:
         print(_red("FATAL: tokenizer round-trip failed before training"))
         print(f"  expected {probe!r}")
