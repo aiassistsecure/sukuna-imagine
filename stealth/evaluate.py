@@ -266,7 +266,7 @@ def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
 
         return gen
 
-    tok = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
+    tok = AutoTokenizer.from_pretrained(model_path)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
