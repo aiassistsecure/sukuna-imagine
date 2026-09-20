@@ -44,8 +44,10 @@ import time
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-from transformers import (AutoTokenizer, AutoModelForCausalLM,
+from transformers import (AutoModelForCausalLM,
                           get_cosine_schedule_with_warmup)
+
+from .tokenizer import load_tokenizer
 
 IGNORE = -100
 
@@ -245,22 +247,12 @@ def main() -> int:
             pass
     print(f"  {_green('attention')} {attn}")
 
-    tok = AutoTokenizer.from_pretrained(a.model, use_fast=True)
-    if tok.pad_token_id is None:
-        tok.pad_token = tok.eos_token
-
-    probe = "SELECT count(*) FROM samples;\n"
-    probe_ids = tok.encode(probe, add_special_tokens=False)
-    probe_decoded = tok.decode(probe_ids, skip_special_tokens=True)
-    print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
-    if not tok.is_fast:
-        print(_red("FATAL: fast tokenizer required; slow tokenizer would corrupt whitespace"))
-        return 6
-    if probe_decoded != probe:
-        print(_red("FATAL: tokenizer round-trip failed before training"))
-        print(f"  expected {probe!r}")
-        print(f"  decoded  {probe_decoded!r}")
+    try:
+        tok = load_tokenizer(a.model)
+    except RuntimeError as exc:
+        print(_red(f"FATAL: {exc}"))
         return 5
+    print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
     print(f"  {_green('roundtrip')} OK")
 
     print(f"  {_green('model')}     {a.model}")
