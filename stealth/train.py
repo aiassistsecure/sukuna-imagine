@@ -328,7 +328,9 @@ def main() -> int:
             nb += 1
             tok_seen += int(att.sum().item())
 
-            if (i + 1) % a.accum == 0:
+            is_accum_boundary = (i + 1) % a.accum == 0
+            is_epoch_tail = (i + 1) == len(dl)
+            if is_accum_boundary or is_epoch_tail:
                 torch.nn.utils.clip_grad_norm_(params, 1.0)
                 opt.step()
                 sched.step()
