@@ -39,6 +39,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 
 import torch
@@ -47,6 +48,18 @@ from transformers import (AutoTokenizer, AutoModelForCausalLM,
                           get_cosine_schedule_with_warmup)
 
 IGNORE = -100
+
+_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+def _ansi(code: str, text: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m" if _COLOR else text
+
+def _green(s: str) -> str: return _ansi("32;1", s)
+def _red(s: str) -> str: return _ansi("31;1", s)
+def _yellow(s: str) -> str: return _ansi("33;1", s)
+def _cyan(s: str) -> str: return _ansi("36;1", s)
+def _magenta(s: str) -> str: return _ansi("35;1", s)
+def _dim(s: str) -> str: return _ansi("2", s)
 
 
 # ------------------------------------------------------------------ dataset --
@@ -94,8 +107,10 @@ class SQLCorpus(Dataset):
                 skipped_bad += 1
                 continue
             self.rows.append((full_ids, labels, rec.get("meta", {})))
+        self.skipped_long = skipped_long
+        self.skipped_bad = skipped_bad
         if skipped_long or skipped_bad:
-            print(f"  ! skipped {skipped_long} over-length, {skipped_bad} unusable")
+            print(f"  {_yellow('!')} skipped {skipped_long} over-length, {skipped_bad} unusable")
 
     def __len__(self):
         return len(self.rows)
@@ -193,14 +208,17 @@ def main() -> int:
         name = torch.cuda.get_device_name(0)
         cap = torch.cuda.get_device_capability(0)
         vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"* {name} | sm_{cap[0]}{cap[1]} | {vram:.1f} GB")
+        print(_cyan("══════════════════ TRAINING ENVIRONMENT ══════════════════"))
+        print(f"  {_green('GPU')}       {name}")
+        print(f"  {_green('compute')}   sm_{cap[0]}{cap[1]}")
+        print(f"  {_green('VRAM')}      {vram:.1f} GB")
         bf16_ok = torch.cuda.is_bf16_supported()
     else:
         print("* NO GPU VISIBLE — this harness is written for an A6000. "
               "Running on CPU will work but will be painfully slow.")
         bf16_ok = False
     dtype = torch.bfloat16 if bf16_ok else torch.float32
-    print(f"* dtype {dtype}")
+    print(f"  {_green('dtype')}     {dtype}")
 
     attn = a.attn
     if attn == "auto":
@@ -211,13 +229,14 @@ def main() -> int:
                 attn = "flash_attention_2"
         except Exception:
             pass
-    print(f"* attention: {attn}")
+    print(f"  {_green('attention')} {attn}")
 
     tok = AutoTokenizer.from_pretrained(a.model)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
-    print(f"* loading {a.model}")
+    print(f"  {_green('model')}     {a.model}")
+    print(_dim("  loading weights locally..."))
     model = AutoModelForCausalLM.from_pretrained(
         a.model, dtype=dtype, attn_implementation=attn, low_cpu_mem_usage=True)
     model.config.use_cache = False
@@ -233,16 +252,23 @@ def main() -> int:
         model.print_trainable_parameters()
     else:
         n = sum(p.numel() for p in model.parameters())
-        print(f"* FULL fine-tune, {n/1e9:.2f}B parameters trainable")
+        print(f"  {_magenta('mode')}      FULL fine-tune")
+        print(f"  {_magenta('trainable')} {n/1e9:.2f}B parameters")
 
     if a.grad_ckpt:
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False})
-        print("* gradient checkpointing ON")
+        print(f"  {_green('grad ckpt')} ON")
 
-    print(f"* corpus {a.corpus}")
+    print("\n" + _cyan("════════════════════ DATASET ════════════════════"))
+    print(f"  {_green('corpus')}    {a.corpus}")
     base = SQLCorpus(a.corpus, tok, max_len=a.max_len)
-    print(f"  {len(base)} samples")
+    print(f"  {_green('samples')}   {len(base)}")
+    print(f"  {_green('max len')}   {a.max_len}")
+    if getattr(base, "skipped_long", 0):
+        frac = base.skipped_long / max(len(base) + base.skipped_long, 1)
+        warn = _red if frac > 0.10 else _yellow
+        print(f"  {warn('over-length')} {base.skipped_long} skipped ({frac:.1%})")
     if not len(base):
         print("FATAL: empty dataset — check the corpus and the chat template")
         return 2
@@ -253,8 +279,10 @@ def main() -> int:
     else:
         ds = Packed(base, a.seq_len, tok.pad_token_id, seed=a.seed)
         coll = lambda b: collate(b, tok.pad_token_id)                          # noqa: E731
-        print(f"  packed into {len(ds)} rows of {a.seq_len} "
-              f"({ds.efficiency:.1%} token efficiency)")
+        eff = f"{ds.efficiency:.1%}"
+        eff_c = _green(eff) if ds.efficiency >= 0.75 else _yellow(eff)
+        print(f"  {_green('packing')}   {len(ds)} rows × {a.seq_len} tokens")
+        print(f"  {_green('efficiency')} {eff_c}")
 
     dl = DataLoader(ds, batch_size=a.batch, shuffle=True, collate_fn=coll,
                     num_workers=a.workers, pin_memory=(dev == "cuda"),
@@ -265,8 +293,16 @@ def main() -> int:
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.01, betas=(0.9, 0.95))
     sched = get_cosine_schedule_with_warmup(opt, int(a.warmup * total), total)
-    print(f"* {total} optimizer steps "
-          f"(effective batch {a.batch * a.accum} packed rows)")
+    print("\n" + _cyan("══════════════════ TRAINING PLAN ══════════════════"))
+    print(f"  {_green('epochs')}          {a.epochs}")
+    print(f"  {_green('optimizer steps')} {total}")
+    print(f"  {_green('micro batch')}     {a.batch}")
+    print(f"  {_green('grad accum')}      {a.accum}")
+    print(f"  {_green('effective batch')} {a.batch * a.accum} packed rows")
+    print(f"  {_green('sequence len')}    {a.seq_len}")
+    print(f"  {_green('learning rate')}   {a.lr:.2e}")
+    print(f"  {_green('warmup')}          {a.warmup:.1%}")
+    print(f"  {_green('output')}          {a.out}")
 
     os.makedirs(a.out, exist_ok=True)
     json.dump(vars(a), open(os.path.join(a.out, "args.json"), "w"), indent=2)
@@ -281,7 +317,9 @@ def main() -> int:
     for ep in range(math.ceil(a.epochs)):
         if done:
             break
+        print("\n" + _magenta(f"════════════════════ EPOCH {ep + 1}/{math.ceil(a.epochs)} ════════════════════"))
         run, nb = 0.0, 0
+        ep_loss_sum, ep_steps = 0.0, 0
         for i, (ids, lab, att) in enumerate(dl):
             ids, lab, att = ids.to(dev, non_blocking=True), lab.to(dev, non_blocking=True), att.to(dev, non_blocking=True)
             out = model(input_ids=ids, attention_mask=att, labels=lab)
@@ -298,13 +336,35 @@ def main() -> int:
                 step += 1
                 el = time.perf_counter() - t0
                 loss = run / max(nb, 1)
-                if step % 5 == 0 or step == 1:
-                    mem = (torch.cuda.max_memory_allocated() / 1e9) if dev == "cuda" else 0
-                    print(f"  step {step}/{total}  loss {loss:.4f}  "
-                          f"{tok_seen/el:,.0f} tok/s  {el:.0f}s  peak {mem:.1f}GB",
-                          flush=True)
+                ep_loss_sum += loss
+                ep_steps += 1
+                mem = (torch.cuda.max_memory_allocated() / 1e9) if dev == "cuda" else 0
+                lr = sched.get_last_lr()[0] if sched.get_last_lr() else a.lr
+                toks = tok_seen / max(el, 1e-9)
+
+                if not math.isfinite(loss):
+                    print(_red(f"\nFATAL: non-finite loss at step {step}: {loss}"), flush=True)
+                    return 3
+
+                loss_c = _green(f"{loss:.4f}") if loss < 2.0 else (_yellow(f"{loss:.4f}") if loss < 4.0 else _red(f"{loss:.4f}"))
+                mem_ratio = mem / max(vram, 1e-9) if dev == "cuda" else 0.0
+                mem_c = _red(f"{mem:.1f}GB") if mem_ratio >= 0.92 else (_yellow(f"{mem:.1f}GB") if mem_ratio >= 0.80 else _green(f"{mem:.1f}GB"))
+                print(
+                    f"  {_cyan(f'step {step:>4}/{total:<4}')}  "
+                    f"loss {loss_c}  "
+                    f"lr {_dim(f'{lr:.2e}')}  "
+                    f"{_green(f'{toks:,.0f} tok/s')}  "
+                    f"peak {mem_c}  "
+                    f"{_dim(f'{el:.0f}s')}",
+                    flush=True,
+                )
+                if mem_ratio >= 0.92:
+                    print(f"    {_red('⚠ VRAM')} peak usage is above 92% of the device", flush=True)
+
                 log.append({"step": step, "epoch": ep + 1, "loss": loss,
-                            "tokens": tok_seen, "seconds": round(el, 1)})
+                            "lr": lr, "peak_vram_gb": round(mem, 2),
+                            "tokens": tok_seen, "tok_s": round(toks, 1),
+                            "seconds": round(el, 1)})
                 run, nb = 0.0, 0
 
                 if a.save_every and step % a.save_every == 0:
@@ -312,19 +372,27 @@ def main() -> int:
                     model.save_pretrained(ck)
                     tok.save_pretrained(ck)
                     json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=2)
-                    print(f"    checkpoint -> {ck}", flush=True)
+                    print(f"    {_green('✓ checkpoint')} -> {ck}", flush=True)
 
                 if step >= total:
                     done = True
                     break
+
+        if ep_steps:
+            print(f"  {_magenta('epoch mean loss')} {ep_loss_sum / ep_steps:.4f}")
 
     final = os.path.join(a.out, "final")
     model.save_pretrained(final)
     tok.save_pretrained(final)
     json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=2)
     el = time.perf_counter() - t0
-    print(f"* done in {el/60:.1f} min · {tok_seen:,} tokens · "
-          f"{tok_seen/el:,.0f} tok/s -> {final}")
+    print("\n" + _green("══════════════════ TRAINING COMPLETE ══════════════════"))
+    print(f"  {_green('time')}       {el/60:.1f} min")
+    print(f"  {_green('tokens')}     {tok_seen:,}")
+    print(f"  {_green('throughput')} {tok_seen/el:,.0f} tok/s")
+    if log:
+        print(f"  {_green('final loss')} {log[-1]['loss']:.4f}")
+    print(f"  {_green('checkpoint')} {final}")
     return 0
 
 
