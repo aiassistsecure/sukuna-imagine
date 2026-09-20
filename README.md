@@ -188,13 +188,13 @@ mistralai/Devstral-Small-2507        teacher; proposes harder SQL
    verified SQL + Imagine identity
                  │
                  ▼
-Qwen/Qwen2.5-Coder-0.5B-Instruct    canonical student base
+deepseek-ai/deepseek-coder-1.3b-instruct    canonical student base
                  │
                  ▼
               Imagine                compact local model
 ```
 
-The canonical v1 student is **Qwen2.5-Coder-0.5B-Instruct**. Devstral is an
+The canonical v1 student is **DeepSeek-Coder-1.3B-Instruct**. Devstral is an
 optional corpus teacher only: its SQL never enters training unless the live
 database agrees with the deterministic reference at L4.
 
@@ -230,9 +230,9 @@ bash scripts/train_imagine.sh
 Override any component without editing the recipe:
 
 ```bash
-STUDENT=Qwen/Qwen2.5-Coder-0.5B-Instruct \
+STUDENT=deepseek-ai/deepseek-coder-1.3b-instruct \
 CORPUS=corpus/imagine_train.jsonl \
-OUT=runs/imagine-qwen05-v1 \
+OUT=runs/imagine-deepseek13-v1 \
 bash scripts/train_imagine.sh
 ```
 
@@ -251,7 +251,7 @@ The first checkpoint is still judged on the held-out schema with
 | 🟢 Parallel corpus forge | **built · 2,027 candidates/sec on 2 cores · 19/19 poison fixtures** |
 | 🟢 Execution-accuracy eval | **built · 4/4 directions verified (oracle 100%, saboteur 0%)** |
 | 🟢 Training harness (A6000) | **built · bf16 · packed · FlashAttention-2 · full FT default** |
-| 🟢 Canonical student base | **Qwen2.5-Coder-0.5B-Instruct** |\n| 🟢 Optional teacher path | **Devstral Small 2507 → L4 execution gate** |\n| 🟡 Imagine v1 training | identity + verified SQL corpus ready to build |
+| 🟢 Canonical student base | **DeepSeek-Coder-1.3B-Instruct** |\n| 🟢 Optional teacher path | **Devstral Small 2507 → L4 execution gate** |\n| 🟡 Imagine v1 training | identity + verified SQL corpus ready to build |
 
 ### One command
 
