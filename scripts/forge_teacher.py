@@ -6,7 +6,9 @@ remains the authority: a teacher proposal is admitted only if it produces the
 same answer as the reference query on real data.
 """
 from __future__ import annotations
-import argparse, json, os
+import argparse, json, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stealth.evaluate import hf_generator
 from stealth.forge import forge
