@@ -398,6 +398,9 @@ def main() -> int:
             print(f"  {_magenta('epoch mean loss')} {ep_loss_sum / ep_steps:.4f}")
 
     final = os.path.join(a.out, "final")
+    if a.lora > 0:
+        print(f"  {_cyan('merge')}      folding LoRA adapter into full local checkpoint")
+        model = model.merge_and_unload()
     model.save_pretrained(final)
     tok.save_pretrained(final)
     json.dump(log, open(os.path.join(a.out, "log.json"), "w"), indent=2)
