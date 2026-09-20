@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Build the canonical Imagine v1 student from Qwen2.5-Coder-0.5B-Instruct.
+# Build the canonical Imagine v1 student from DeepSeek-Coder-1.3B-Instruct.
 set -euo pipefail
 
-STUDENT="${STUDENT:-Qwen/Qwen2.5-Coder-0.5B-Instruct}"
+STUDENT="${STUDENT:-deepseek-ai/deepseek-coder-1.3b-instruct}"
 CORPUS="${CORPUS:-corpus/imagine_train.jsonl}"
-OUT="${OUT:-runs/imagine-qwen05-v1}"
+OUT="${OUT:-runs/imagine-deepseek13-v1}"
 
 python -m stealth.train \
   --model "$STUDENT" \
   --corpus "$CORPUS" \
   --out "$OUT" \
-  --epochs "${EPOCHS:-3}" \
-  --batch "${BATCH:-16}" \
+  --epochs "${EPOCHS:-4}" \
+  --batch "${BATCH:-8}" \
   --accum "${ACCUM:-1}" \
   --seq-len "${SEQ_LEN:-2048}" \
   --save-every "${SAVE_EVERY:-100}"
