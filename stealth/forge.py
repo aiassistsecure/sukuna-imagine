@@ -38,7 +38,7 @@ import psycopg2
 
 from .gate import Gate, Level
 from .schemas import Schema, CATALOG, TRAIN_KEYS, HELDOUT_KEYS
-from .sentinel import wrap
+from .sentinel import wrap, extract_one
 
 
 # --------------------------------------------------------------- materialise --
@@ -191,6 +191,38 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
     return out
 
 
+def teacher_candidates(schema: Schema, rng: random.Random, generate,
+                       limit: int = 32, prompt_style: str = "ddl") -> tuple[list[Candidate], int]:
+    """Ask a larger model for alternate SQL, then let L4 decide whether it lives.
+
+    The teacher never supplies truth. Reference SQL comes from the deterministic
+    template generator; the teacher only proposes a different implementation for
+    the same question. Malformed/refusal outputs are counted and skipped here.
+    Semantic mistakes survive only until the normal execution gate rejects them.
+    """
+    bases = [x for x in template_candidates(schema, rng) if x.reference_sql]
+    rng.shuffle(bases)
+    bases = bases[:max(0, limit)]
+    out: list[Candidate] = []
+    malformed = 0
+
+    for base in bases:
+        text = generate(build_prompt(schema, base.question, prompt_style))
+        blk = extract_one(text)
+        if blk is None or blk.kind != "SQL" or not blk.payload.strip():
+            malformed += 1
+            continue
+        out.append(Candidate(
+            schema_key=schema.key,
+            question=base.question,
+            sql=blk.payload.strip(),
+            reference_sql=base.reference_sql,
+            kind="teacher",
+            difficulty=max(base.difficulty, 3),
+        ))
+    return out, malformed
+
+
 # ----------------------------------------------------------------- prompt fmt --
 
 SYSTEM = (
@@ -258,7 +290,8 @@ def _process(c: Candidate) -> dict:
 def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
           workers: int | None = None, timeout_ms: int = 5000,
           max_rows: int = 2000, prompt_style: str = "ddl",
-          rejects_path: str | None = None) -> dict:
+          rejects_path: str | None = None, teacher_generate=None,
+          teacher_per_schema: int = 0) -> dict:
     """Run the full forge. Returns a stats dict.
 
     Rejects are written too, and that is not an afterthought: the rejected
@@ -275,10 +308,21 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
         print(f"  {k:12} ready")
 
     cands: list[Candidate] = []
+    teacher_malformed = 0
     for k in keys:
-        c = template_candidates(CATALOG[k], rng)
-        cands.extend(c)
-        print(f"  {k:12} {len(c):5d} candidates")
+        templ = template_candidates(CATALOG[k], rng)
+        cands.extend(templ)
+        teacher_n = 0
+        if teacher_generate is not None and teacher_per_schema > 0:
+            taught, malformed = teacher_candidates(
+                CATALOG[k], rng, teacher_generate,
+                limit=teacher_per_schema, prompt_style=prompt_style,
+            )
+            cands.extend(taught)
+            teacher_n = len(taught)
+            teacher_malformed += malformed
+        suffix = f" + {teacher_n} teacher" if teacher_generate is not None else ""
+        print(f"  {k:12} {len(templ):5d} template{suffix}")
     print(f"* {len(cands)} candidates, {workers} workers")
 
     t0 = time.perf_counter()
@@ -318,6 +362,8 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
         "elapsed_s": round(elapsed, 2),
         "per_sec": round(len(cands) / max(elapsed, 1e-9), 1),
         "workers": workers,
+        "teacher_candidates": sum(1 for r in recs if r["kind"] == "teacher"),
+        "teacher_malformed": teacher_malformed,
         "rejected_by_stop_level": by_level,
         "out": out_path,
     }
