@@ -270,6 +270,22 @@ def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
+    probe = "SELECT count(*) FROM samples;\n"
+    probe_ids = tok.encode(probe, add_special_tokens=False)
+    probe_decoded = tok.decode(probe_ids, skip_special_tokens=True)
+    backend_decoder = getattr(getattr(tok, "backend_tokenizer", None), "decoder", None)
+    print("* tokenizer diagnostics")
+    print(f"  class      {tok.__class__.__name__}")
+    print(f"  decoder    {backend_decoder}")
+    print(f"  roundtrip  {'OK' if probe_decoded == probe else 'FAIL'}")
+    if probe_decoded != probe:
+        print(f"  expected   {probe!r}")
+        print(f"  decoded    {probe_decoded!r}")
+        raise RuntimeError(
+            "Tokenizer round-trip failed. Refusing to evaluate model output because "
+            "whitespace/token decoding is not trustworthy."
+        )
+
     def gen(messages):
         if not tok.chat_template:
             raise ValueError(
