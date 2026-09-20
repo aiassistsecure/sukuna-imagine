@@ -140,24 +140,103 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
 # ------------------------------------------------------------------ runners --
 
 def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
+    """Load a Hugging Face causal LM and return generate(messages) -> text.
+
+    Ordinary HF instruct models use their tokenizer chat template. Devstral
+    checkpoints intentionally use Mistral's Tekken tokenizer through
+    mistral-common instead, so they get a dedicated, upstream-compatible path.
+
+    On CUDA, device_map="auto" lets Accelerate shard large checkpoints across
+    all visible GPUs instead of forcing the whole model onto cuda:0.
+    """
     import torch
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    tok = AutoTokenizer.from_pretrained(model_path)
+
+    want_cuda = torch.cuda.is_available() and device in ("auto", "cuda")
+    dtype = torch.bfloat16 if (want_cuda and torch.cuda.is_bf16_supported()) else torch.float32
+    load_kwargs = {"dtype": dtype, "low_cpu_mem_usage": True}
+    if device == "auto" and torch.cuda.is_available():
+        load_kwargs["device_map"] = "auto"
+
+    m = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs).eval()
+    if not (device == "auto" and torch.cuda.is_available()):
+        dev = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
+        m = m.to(dev)
+
+    # With a sharded model, inputs belong on the device holding the embedding
+    # layer. For ordinary single-device models this resolves to that same device.
+    input_device = m.get_input_embeddings().weight.device
+
+    if "devstral" in model_path.lower():
+        try:
+            from mistral_common.protocol.instruct.messages import SystemMessage, UserMessage
+            from mistral_common.protocol.instruct.request import ChatCompletionRequest
+            from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+        except ImportError as e:
+            raise RuntimeError(
+                "Devstral requires mistral-common>=1.7.0. "
+                "Install/update requirements.txt before evaluating."
+            ) from e
+
+        tok = MistralTokenizer.from_hf_hub(model_path)
+
+        def gen(messages):
+            converted = []
+            for msg in messages:
+                role = msg["role"]
+                if role == "system":
+                    converted.append(SystemMessage(content=msg["content"]))
+                elif role == "user":
+                    converted.append(UserMessage(content=msg["content"]))
+                else:
+                    raise ValueError(f"unsupported Devstral prompt role: {role!r}")
+
+            encoded = tok.encode_chat_completion(
+                ChatCompletionRequest(messages=converted)
+            )
+            input_ids = torch.tensor(
+                [encoded.tokens], dtype=torch.long, device=input_device
+            )
+            with torch.no_grad():
+                out = m.generate(
+                    input_ids=input_ids,
+                    max_new_tokens=max_new,
+                    do_sample=False,
+                )
+            return tok.decode(out[0][input_ids.shape[1]:].tolist())
+
+        return gen
+
+    tok = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
-    dev = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
-    dtype = torch.bfloat16 if (dev == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
-    m = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype,
-                                             low_cpu_mem_usage=True).to(dev).eval()
 
     def gen(messages):
-        enc = tok.apply_chat_template(messages, tokenize=True,
-                                      add_generation_prompt=True,
-                                      return_dict=True, return_tensors="pt").to(dev)
+        if not tok.chat_template:
+            raise ValueError(
+                f"{model_path!r} does not expose tokenizer.chat_template. "
+                "Use a model-specific tokenizer path or --url with an "
+                "OpenAI-compatible server."
+            )
+        enc = tok.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(input_device)
         with torch.no_grad():
-            out = m.generate(**enc, max_new_tokens=max_new, do_sample=False,
-                             pad_token_id=tok.pad_token_id or tok.eos_token_id)
-        return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
+            out = m.generate(
+                **enc,
+                max_new_tokens=max_new,
+                do_sample=False,
+                pad_token_id=tok.pad_token_id or tok.eos_token_id,
+            )
+        return tok.decode(
+            out[0][enc["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        )
+
     return gen
 
 
