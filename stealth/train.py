@@ -185,6 +185,21 @@ def collate(batch, pad_id: int):
             torch.tensor(att, dtype=torch.long))
 
 
+class Collator:
+    """Picklable DataLoader collator for spawn-based platforms such as Windows."""
+
+    def __init__(self, pad_id: int, packed: bool):
+        self.pad_id = pad_id
+        self.packed = packed
+
+    def __call__(self, batch):
+        if self.packed:
+            rows = batch
+        else:
+            rows = [(ids, labels) for ids, labels, _ in batch]
+        return collate(rows, self.pad_id)
+
+
 # -------------------------------------------------------------------- train --
 
 def main() -> int:
@@ -295,10 +310,10 @@ def main() -> int:
 
     if a.no_pack:
         ds = base
-        coll = lambda b: collate([(i, l) for i, l, _ in b], tok.pad_token_id)  # noqa: E731
+        coll = Collator(tok.pad_token_id, packed=False)
     else:
         ds = Packed(base, a.seq_len, tok.pad_token_id, seed=a.seed)
-        coll = lambda b: collate(b, tok.pad_token_id)                          # noqa: E731
+        coll = Collator(tok.pad_token_id, packed=True)
         eff = f"{ds.efficiency:.1%}"
         eff_c = _green(eff) if ds.efficiency >= 0.75 else _yellow(eff)
         print(f"  {_green('packing')}   {len(ds)} rows × {a.seq_len} tokens")
