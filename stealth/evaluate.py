@@ -39,12 +39,32 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stealth.forge import build_prompt, materialise, _swap_db      # noqa: E402
-from stealth.gate import Gate, Level                               # noqa: E402
+from stealth.gate import Gate, Level, check_parse                  # noqa: E402
 from stealth.schemas import CATALOG, HELDOUT_KEYS, TRAIN_KEYS, get  # noqa: E402
 from stealth.sentinel import extract_one                            # noqa: E402
 
 _NO_REL = re.compile(r'relation "([^"]+)" does not exist', re.I)
 _NO_COL = re.compile(r'column "?([^"\s]+)"? does not exist', re.I)
+
+
+def _diagnostic_sql(text: str) -> str | None:
+    """Extract parseable raw SQL for baseline diagnostics only.
+
+    Strict execution accuracy still requires a valid sentinel block. This
+    helper lets us distinguish "model ignored the envelope" from "model cannot
+    write PostgreSQL" during student-base selection.
+    """
+    s = text.strip()
+    fenced = re.search(r"```(?:sql|postgresql)?\s*(.*?)```", s, re.I | re.S)
+    if fenced:
+        s = fenced.group(1).strip()
+    first = re.search(r"\b(SELECT|WITH)\b", s, re.I)
+    if first:
+        s = s[first.start():].strip()
+    if not re.match(r"^(SELECT|WITH)\b", s, re.I):
+        return None
+    ok, _, _ = check_parse(s)
+    return s if ok else None
 
 
 def load_eval_set(path: str) -> list[dict]:
@@ -61,7 +81,8 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
     the metric changing underneath us.
     """
     gates: dict[str, Gate] = {}
-    tally = {"n": 0, "parseable": 0, "executable": 0, "correct": 0,
+    tally = {"n": 0, "parseable": 0, "raw_sql_parseable": 0,
+             "executable": 0, "correct": 0,
              "refusal": 0, "unparseable_block": 0,
              "invented_relation": 0, "invented_column": 0, "wrong_answer": 0}
     per_schema: dict[str, dict[str, int]] = {}
@@ -86,7 +107,12 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
         blk = extract_one(text)
         if blk is None:
             tally["unparseable_block"] += 1
+            raw_sql = _diagnostic_sql(text)
+            if raw_sql is not None:
+                tally["raw_sql_parseable"] += 1
             details.append({**row, "verdict": "unparseable_block",
+                            "raw_sql_parseable": raw_sql is not None,
+                            "raw_sql": raw_sql,
                             "output": text[:300], "gen_ms": round(gen_ms)})
             continue
         if blk.kind != "SQL":
@@ -129,6 +155,8 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
     n = max(tally["n"], 1)
     tally["execution_accuracy"] = round(tally["correct"] / n, 4)
     tally["parse_rate"] = round(tally["parseable"] / n, 4)
+    tally["raw_sql_parse_rate"] = round(tally["raw_sql_parseable"] / n, 4)
+    tally["protocol_compliance"] = round((tally["n"] - tally["unparseable_block"]) / n, 4)
     tally["execute_rate"] = round(tally["executable"] / n, 4)
     tally["per_schema"] = {
         k: {**v, "acc": round(v["correct"] / max(v["n"], 1), 4)}
@@ -298,7 +326,9 @@ def main() -> int:
     t = res["tally"]
     json.dump(res, open(a.out, "w"), indent=2)
 
-    print(f"\n  parse rate          {t['parse_rate']:.1%}")
+    print(f"\n  protocol compliance {t['protocol_compliance']:.1%}")
+    print(f"  strict parse rate   {t['parse_rate']:.1%}")
+    print(f"  raw SQL parse rate  {t['raw_sql_parse_rate']:.1%}   <-- diagnostic only")
     print(f"  execute rate        {t['execute_rate']:.1%}")
     print(f"  EXECUTION ACCURACY  {t['execution_accuracy']:.1%}   <-- the metric")
     print(f"  wrong answer        {t['wrong_answer']}")
