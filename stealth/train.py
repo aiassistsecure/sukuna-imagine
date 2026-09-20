@@ -81,15 +81,23 @@ def _ids(x):
 class SQLCorpus(Dataset):
     """Loss on the assistant span only; prompt tokens are masked to -100."""
 
+    POISON_MARKERS = ("Ġ", "Ċ", "▁")
+
     def __init__(self, path: str, tok, max_len: int = 2048):
         self.rows = []
         skipped_long = skipped_bad = 0
-        for line in open(path):
+        poisoned = []
+        for lineno, line in enumerate(open(path), 1):
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
             msgs = rec["messages"]
+            assistant_text = msgs[-1].get("content", "") if msgs else ""
+            hits = [m for m in self.POISON_MARKERS if m in assistant_text]
+            if hits:
+                poisoned.append((lineno, hits, assistant_text[:160]))
+                continue
             if msgs[-1]["role"] != "assistant":
                 skipped_bad += 1
                 continue
@@ -107,6 +115,12 @@ class SQLCorpus(Dataset):
                 skipped_bad += 1
                 continue
             self.rows.append((full_ids, labels, rec.get("meta", {})))
+        if poisoned:
+            print(_red("FATAL: tokenizer-artifact contamination found in training targets"))
+            for lineno, hits, preview in poisoned[:10]:
+                print(f"  line {lineno}: markers={hits}  {preview!r}")
+            print(_red("Refusing to train. Rebuild or clean the corpus first."))
+            raise SystemExit(4)
         self.skipped_long = skipped_long
         self.skipped_bad = skipped_bad
         if skipped_long or skipped_bad:
