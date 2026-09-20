@@ -266,7 +266,7 @@ def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
 
         return gen
 
-    tok = AutoTokenizer.from_pretrained(model_path)
+    tok = AutoTokenizer.from_pretrained(model_path, use_fast=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
@@ -276,6 +276,8 @@ def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
     backend_decoder = getattr(getattr(tok, "backend_tokenizer", None), "decoder", None)
     print("* tokenizer diagnostics")
     print(f"  class      {tok.__class__.__name__}")
+    if not tok.is_fast:
+        raise RuntimeError("Fast tokenizer required; got slow tokenizer, refusing evaluation.")
     print(f"  decoder    {backend_decoder}")
     print(f"  roundtrip  {'OK' if probe_decoded == probe else 'FAIL'}")
     if probe_decoded != probe:
