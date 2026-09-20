@@ -46,6 +46,21 @@ from stealth.sentinel import extract_one                            # noqa: E402
 _NO_REL = re.compile(r'relation "([^"]+)" does not exist', re.I)
 _NO_COL = re.compile(r'column "?([^"\s]+)"? does not exist', re.I)
 
+_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+def _ansi(code: str, text: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m" if _COLOR else text
+
+def _green(s: str) -> str: return _ansi("32;1", s)
+def _red(s: str) -> str: return _ansi("31;1", s)
+def _yellow(s: str) -> str: return _ansi("33;1", s)
+def _cyan(s: str) -> str: return _ansi("36;1", s)
+def _dim(s: str) -> str: return _ansi("2", s)
+def _magenta(s: str) -> str: return _ansi("35;1", s)
+
+def _preview(text: str, n: int = 220) -> str:
+    one = " ".join((text or "").strip().split())
+    return one if len(one) <= n else one[:n - 1] + "…"
+
 
 def _diagnostic_sql(text: str) -> str | None:
     """Extract parseable raw SQL for baseline diagnostics only.
@@ -114,11 +129,23 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
                             "raw_sql_parseable": raw_sql is not None,
                             "raw_sql": raw_sql,
                             "output": text[:300], "gen_ms": round(gen_ms)})
+            if verbose:
+                print(f"\n{_red('✗ PROTOCOL')} {_cyan(key)}  {_dim(f'{gen_ms:.0f} ms')}")
+                print(f"  {_magenta('Q')}   {row['question']}")
+                print(f"  {_yellow('OUT')} {_preview(text)}")
+                if raw_sql is not None:
+                    print(f"  {_green('RAW SQL PARSES')} {_preview(raw_sql)}")
+                else:
+                    print(f"  {_red('RAW SQL INVALID')} no parseable SELECT/WITH found")
             continue
         if blk.kind != "SQL":
             tally["refusal"] += 1
             details.append({**row, "verdict": f"refusal:{blk.kind}",
                             "output": blk.payload[:200], "gen_ms": round(gen_ms)})
+            if verbose:
+                print(f"\n{_yellow('↪ REFUSAL')} {_cyan(key)}  {_dim(f'{gen_ms:.0f} ms')}")
+                print(f"  {_magenta('Q')}   {row['question']}")
+                print(f"  {_yellow(blk.kind)} {_preview(blk.payload)}")
             continue
 
         r = gate.run(blk.payload, reference_sql=row["reference_sql"])
@@ -146,8 +173,12 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
         details.append({**row, "verdict": verdict, "sql": blk.payload,
                         "reason": r.reason, "gen_ms": round(gen_ms)})
         if verbose:
-            mark = "ok  " if verdict == "correct" else "FAIL"
-            print(f"  [{mark}] {key:10} {verdict:20} {row['question'][:52]}")
+            icon = _green("✓ CORRECT") if verdict == "correct" else _red("✗ FAIL")
+            print(f"\n{icon} {_cyan(key)}  {_dim(f'{gen_ms:.0f} ms')}  {_dim(f'gate={r.level.name}')}")
+            print(f"  {_magenta('Q')}   {row['question']}")
+            print(f"  {_cyan('SQL')} {_preview(blk.payload)}")
+            if verdict != "correct":
+                print(f"  {_red('WHY')} {_preview(r.reason, 300)}")
 
     for g in gates.values():
         g.close()
@@ -326,11 +357,17 @@ def main() -> int:
     t = res["tally"]
     json.dump(res, open(a.out, "w"), indent=2)
 
-    print(f"\n  protocol compliance {t['protocol_compliance']:.1%}")
-    print(f"  strict parse rate   {t['parse_rate']:.1%}")
-    print(f"  raw SQL parse rate  {t['raw_sql_parse_rate']:.1%}   <-- diagnostic only")
-    print(f"  execute rate        {t['execute_rate']:.1%}")
-    print(f"  EXECUTION ACCURACY  {t['execution_accuracy']:.1%}   <-- the metric")
+    print("\n" + _cyan("══════════════════ EVALUATION SUMMARY ══════════════════"))
+    protocol_s = f"{t['protocol_compliance']:.1%}"
+    parse_s = f"{t['parse_rate']:.1%}"
+    raw_s = f"{t['raw_sql_parse_rate']:.1%}"
+    exec_s = f"{t['execute_rate']:.1%}"
+    print(f"  protocol compliance {_yellow(protocol_s)}")
+    print(f"  strict parse rate   {_yellow(parse_s)}")
+    print(f"  raw SQL parse rate  {_cyan(raw_s)}  {_dim('(diagnostic only)')}")
+    print(f"  execute rate        {_yellow(exec_s)}")
+    acc = _green(f"{t['execution_accuracy']:.1%}") if t["execution_accuracy"] > 0 else _red(f"{t['execution_accuracy']:.1%}")
+    print(f"  EXECUTION ACCURACY  {acc}  {_dim('<-- the metric')}")
     print(f"  wrong answer        {t['wrong_answer']}")
     print(f"  invented relation   {t['invented_relation']}")
     print(f"  invented column     {t['invented_column']}")
