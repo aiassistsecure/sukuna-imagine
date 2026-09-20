@@ -249,6 +249,17 @@ def main() -> int:
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
+    probe = "SELECT count(*) FROM samples;\n"
+    probe_ids = tok.encode(probe, add_special_tokens=False)
+    probe_decoded = tok.decode(probe_ids, skip_special_tokens=True)
+    print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
+    if probe_decoded != probe:
+        print(_red("FATAL: tokenizer round-trip failed before training"))
+        print(f"  expected {probe!r}")
+        print(f"  decoded  {probe_decoded!r}")
+        return 5
+    print(f"  {_green('roundtrip')} OK")
+
     print(f"  {_green('model')}     {a.model}")
     print(_dim("  loading weights locally..."))
     model = AutoModelForCausalLM.from_pretrained(
