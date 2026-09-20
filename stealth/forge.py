@@ -212,6 +212,9 @@ def teacher_candidates(schema: Schema, rng: random.Random, generate,
         if blk is None or blk.kind != "SQL" or not blk.payload.strip():
             malformed += 1
             continue
+        if any(marker in blk.payload for marker in ("Ġ", "Ċ", "▁")):
+            malformed += 1
+            continue
         out.append(Candidate(
             schema_key=schema.key,
             question=base.question,
