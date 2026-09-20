@@ -211,7 +211,7 @@ def hf_generator(model_path: str, max_new: int = 256, device: str = "auto"):
     import torch
     from transformers import AutoModelForCausalLM
 
-from .tokenizer import load_tokenizer
+    from .tokenizer import load_tokenizer
 
     want_cuda = torch.cuda.is_available() and device in ("auto", "cuda")
     dtype = torch.bfloat16 if (want_cuda and torch.cuda.is_bf16_supported()) else torch.float32
