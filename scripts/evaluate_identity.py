@@ -5,7 +5,7 @@ The candidate model answers under Imagine's intended runtime system prompt.
 A separate judge model grades semantic correctness against an explicit rubric.
 
 Default judge:
-    deepseek-ai/deepseek-coder-33b-instruct
+    deepseek-ai/deepseek-coder-6.7b-instruct
 
 The judge returns JSON for every case so results remain auditable.
 """
@@ -156,7 +156,7 @@ def main() -> int:
     ap.add_argument("--model", required=True, help="candidate Imagine checkpoint")
     ap.add_argument(
         "--judge",
-        default="deepseek-ai/deepseek-coder-33b-instruct",
+        default="deepseek-ai/deepseek-coder-6.7b-instruct",
         help="separate HF model used to grade candidate responses",
     )
     ap.add_argument("--out", default="eval_identity.json")
@@ -212,7 +212,7 @@ def main() -> int:
             "expected": case["expected"],
             "output": answer,
             "judge": verdict,
-            "judge_raw": judge_raw,
+            "judge_raw": judge_raw,\n            "claim_extraction": extract_raw,
         })
 
         icon = "✓" if verdict["pass"] else ("~" if verdict["score"] == 0.5 else "✗")
