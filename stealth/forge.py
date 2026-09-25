@@ -148,25 +148,105 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
                 f"SELECT {g.quoted}, count(1) FROM {tq} GROUP BY 1", "group_count",
                 difficulty=2))
 
-        # --- top-N ----------------------------------------------------------
-        for c in numeric[:1]:
-            for n in (3, 5):
+        # --- richer numeric semantics ---------------------------------------
+        # The held-out telemetry failures exposed an important curriculum gap:
+        # the model could write valid SQL but sometimes changed projection,
+        # ordering, or predicate semantics. Generate many equivalent forms so
+        # L4 teaches the *result*, not one memorised query string.
+        for c in numeric:
+            out.extend([
+                Candidate(
+                    S.key,
+                    f"What is the minimum {c.name} in {t.name}?",
+                    f"SELECT min({c.quoted}) FROM {tq}",
+                    f"SELECT {c.quoted} FROM {tq} WHERE {c.quoted} IS NOT NULL "
+                    f"ORDER BY {c.quoted} ASC LIMIT 1",
+                    "min", difficulty=2),
+                Candidate(
+                    S.key,
+                    f"What is the maximum {c.name} in {t.name}?",
+                    f"SELECT max({c.quoted}) FROM {tq}",
+                    f"SELECT {c.quoted} FROM {tq} WHERE {c.quoted} IS NOT NULL "
+                    f"ORDER BY {c.quoted} DESC LIMIT 1",
+                    "max", difficulty=2),
+                Candidate(
+                    S.key,
+                    f"How many distinct {c.name} values are in {t.name}?",
+                    f"SELECT count(DISTINCT {c.quoted}) FROM {tq}",
+                    f"SELECT count(*) FROM (SELECT DISTINCT {c.quoted} FROM {tq} "
+                    f"WHERE {c.quoted} IS NOT NULL) q",
+                    "count_distinct_numeric", difficulty=3),
+                Candidate(
+                    S.key,
+                    f"Show {t.name} where {c.name} is at least zero.",
+                    f"SELECT * FROM {tq} WHERE {c.quoted} >= 0",
+                    f"SELECT * FROM {tq} WHERE NOT ({c.quoted} < 0) "
+                    f"AND {c.quoted} IS NOT NULL",
+                    "numeric_gte", difficulty=2),
+            ])
+
+            # Ranking questions deliberately require the complete row shape.
+            # This directly trains against the held-out failure where a model
+            # returned a plausible subset/join instead of SELECT *.
+            for n in (1, 2, 3, 5):
                 out.append(Candidate(
                     S.key,
                     f"What are the top {n} {t.name} by {c.name}?",
                     f"SELECT * FROM {tq} ORDER BY {c.quoted} DESC NULLS LAST LIMIT {n}",
                     f"SELECT * FROM {tq} ORDER BY {c.quoted} DESC NULLS LAST LIMIT {n}",
                     "top_n", difficulty=2))
+                out.append(Candidate(
+                    S.key,
+                    f"What are the bottom {n} {t.name} by {c.name}?",
+                    f"SELECT * FROM {tq} ORDER BY {c.quoted} ASC NULLS LAST LIMIT {n}",
+                    f"SELECT * FROM {tq} ORDER BY {c.quoted} ASC NULLS LAST LIMIT {n}",
+                    "bottom_n", difficulty=2))
 
-        # --- date range -----------------------------------------------------
-        for d in dated[:1]:
+        # --- richer text semantics ------------------------------------------
+        for g in textual:
             out.append(Candidate(
                 S.key,
-                f"Which {t.name} happened in 2026?",
-                f"SELECT * FROM {tq} WHERE {d.quoted} >= '2026-01-01' "
-                f"AND {d.quoted} < '2027-01-01'",
-                f"SELECT * FROM {tq} WHERE extract(year from {d.quoted}) = 2026",
-                "date_range", difficulty=3))
+                f"What distinct {g.name} values occur in {t.name}?",
+                f"SELECT DISTINCT {g.quoted} FROM {tq} ORDER BY {g.quoted} NULLS LAST",
+                f"SELECT {g.quoted} FROM {tq} GROUP BY {g.quoted} "
+                f"ORDER BY {g.quoted} NULLS LAST",
+                "distinct_text", difficulty=2))
+            out.append(Candidate(
+                S.key,
+                f"How many distinct {g.name} values are set in {t.name}?",
+                f"SELECT count(DISTINCT {g.quoted}) FROM {tq}",
+                f"SELECT count(*) FROM (SELECT DISTINCT {g.quoted} FROM {tq} "
+                f"WHERE {g.quoted} IS NOT NULL) q",
+                "count_distinct_text", difficulty=3))
+
+        # --- date/timestamp semantics ---------------------------------------
+        # Never add unrelated predicates to date questions. Multiple windows
+        # teach clean temporal filtering and protect against invented filters.
+        for d in dated:
+            for year in (2025, 2026):
+                out.append(Candidate(
+                    S.key,
+                    f"Which {t.name} happened in {year}?",
+                    f"SELECT * FROM {tq} WHERE {d.quoted} >= '{year}-01-01' "
+                    f"AND {d.quoted} < '{year + 1}-01-01'",
+                    f"SELECT * FROM {tq} WHERE extract(year from {d.quoted}) = {year}",
+                    "date_range", difficulty=3))
+                out.append(Candidate(
+                    S.key,
+                    f"How many {t.name} happened in {year}?",
+                    f"SELECT count(*) FROM {tq} WHERE {d.quoted} >= '{year}-01-01' "
+                    f"AND {d.quoted} < '{year + 1}-01-01'",
+                    f"SELECT count(*) FROM {tq} "
+                    f"WHERE extract(year from {d.quoted}) = {year}",
+                    "date_count", difficulty=3))
+            out.append(Candidate(
+                S.key,
+                f"Which {t.name} happened in March 2026?",
+                f"SELECT * FROM {tq} WHERE {d.quoted} >= '2026-03-01' "
+                f"AND {d.quoted} < '2026-04-01'",
+                f"SELECT * FROM {tq} WHERE extract(year from {d.quoted}) = 2026 "
+                f"AND extract(month from {d.quoted}) = 3",
+                "month_range", difficulty=3))
 
     # --- joins across the first two tables that plausibly relate -----------
     if len(S.tables) >= 2:
@@ -186,6 +266,23 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
                 f"SELECT l.id, (SELECT count(*) FROM {right.quoted} r2 "
                 f"WHERE r2.{fk.quoted} = l.id) FROM {left.quoted} l",
                 "join_count", difficulty=4))
+            out.append(Candidate(
+                S.key,
+                f"How many related {right.name} rows does each {left.name} have?",
+                f"SELECT l.id, count(r.{fk.quoted}) FROM {left.quoted} l "
+                f"LEFT JOIN {right.quoted} r ON r.{fk.quoted} = l.id GROUP BY l.id",
+                f"SELECT l.id, (SELECT count(*) FROM {right.quoted} r2 "
+                f"WHERE r2.{fk.quoted} = l.id) FROM {left.quoted} l",
+                "join_count_projection", difficulty=4))
+            out.append(Candidate(
+                S.key,
+                f"Which {left.name} rows have at least one related {right.name}?",
+                f"SELECT l.* FROM {left.quoted} l WHERE EXISTS "
+                f"(SELECT 1 FROM {right.quoted} r WHERE r.{fk.quoted} = l.id)",
+                f"SELECT l.* FROM {left.quoted} l WHERE l.id IN "
+                f"(SELECT r.{fk.quoted} FROM {right.quoted} r "
+                f"WHERE r.{fk.quoted} IS NOT NULL)",
+                "join_exists", difficulty=4))
 
     rng.shuffle(out)
     return out
@@ -331,7 +428,7 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
     """
     keys = list(schema_keys or TRAIN_KEYS)
     rng = random.Random(seed)
-    workers = workers or cpu_count()
+    workers = workers or min(cpu_count(), 32)
 
     print(f"* materialising {len(keys)} schemas")
     for k in keys:
@@ -406,7 +503,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="stealth corpus forge")
     ap.add_argument("--dsn", default=os.environ.get(
         "STEALTH_ADMIN_DSN",
-        "host=/agent/workspace/pgrun user=stealth dbname=postgres"))
+        f"host={os.path.join(os.getcwd(), 'pgrun')} user=stealth dbname=postgres"))
     ap.add_argument("--out", default="corpus/train.jsonl")
     ap.add_argument("--rejects", default="corpus/rejects.jsonl")
     ap.add_argument("--workers", type=int, default=0)
