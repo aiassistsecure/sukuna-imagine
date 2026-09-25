@@ -44,7 +44,8 @@ import time
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import (AutoModelForCausalLM,
-                          get_cosine_schedule_with_warmup)
+                          get_cosine_schedule_with_warmup,
+                          get_constant_schedule_with_warmup)
 
 from .tokenizer import load_tokenizer
 
@@ -213,6 +214,7 @@ def main() -> int:
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--max-len", type=int, default=2048, help="drop samples longer than this")
     ap.add_argument("--warmup", type=float, default=0.03)
+    ap.add_argument("--scheduler", choices=["cosine", "constant"], default="cosine")
     ap.add_argument("--save-every", type=int, default=100,
                     help="steps. An OOM with epoch-only checkpoints once cost a whole run.")
     ap.add_argument("--workers", type=int, default=None, help="DataLoader workers (default: auto from CPU count)")
@@ -347,7 +349,10 @@ def main() -> int:
     total = max(1, int(steps_per_epoch * a.epochs))
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.01, betas=(0.9, 0.95))
-    sched = get_cosine_schedule_with_warmup(opt, int(a.warmup * total), total)
+    warmup_steps = int(a.warmup * total)
+    sched = (get_constant_schedule_with_warmup(opt, warmup_steps)
+             if a.scheduler == "constant"
+             else get_cosine_schedule_with_warmup(opt, warmup_steps, total))
     print("\n" + _cyan("══════════════════ TRAINING PLAN ══════════════════"))
     print(f"  {_green('epochs')}          {a.epochs}")
     print(f"  {_green('optimizer steps')} {total}")
@@ -357,6 +362,7 @@ def main() -> int:
     print(f"  {_green('sequence len')}    {a.seq_len}")
     print(f"  {_green('learning rate')}   {a.lr:.2e}")
     print(f"  {_green('warmup')}          {a.warmup:.1%}")
+    print(f"  {_green('scheduler')}       {a.scheduler}")
     print(f"  {_green('output')}          {a.out}")
 
     os.makedirs(a.out, exist_ok=True)
