@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""stealth :: training harness (single A6000, 48 GB)
+"""stealth :: hardware-aware single-GPU training harness
 
-Designed for one Ampere card. That is not a limitation to work around -- an
-A6000 comfortably FULL fine-tunes a ~1B model, which removes the constraint
-that caused both regressions on the previous model. LoRA was forced on us by
-2 CPU cores; here it is a choice, and the default is off.
+Designed for one CUDA GPU or CPU fallback. Runtime defaults adapt to visible
+VRAM and device capabilities while explicit CLI flags always win. Full fine-
+tuning remains the default; LoRA is an explicit choice.
 
     bf16 weights  (1B)          ~2 GB
     AdamW states + fp32 master  ~12 GB
@@ -43,9 +42,11 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import (AutoModelForCausalLM,
-                          get_cosine_schedule_with_warmup)
+                          get_cosine_schedule_with_warmup,
+                          get_constant_schedule_with_warmup)
 
 from .tokenizer import load_tokenizer
 
@@ -200,31 +201,54 @@ class Collator:
         return collate(rows, self.pad_id)
 
 
+def _find_subseq_positions(seq: list[int], pat: list[int]) -> set[int]:
+    """Return token positions covered by every exact occurrence of pat in seq."""
+    if not pat or len(pat) > len(seq):
+        return set()
+    out: set[int] = set()
+    n = len(pat)
+    for i in range(len(seq) - n + 1):
+        if seq[i:i+n] == pat:
+            out.update(range(i, i+n))
+    return out
+
+
+def _sentinel_token_sets(tok) -> list[list[int]]:
+    markers = ["<<<SQL>>>", "<<<END>>>", "<<<UNANSWERABLE>>>", "<<<CLARIFY>>>"]
+    pats = []
+    for s in markers:
+        ids = tok(s, add_special_tokens=False)["input_ids"]
+        if ids:
+            pats.append(list(ids))
+    return pats
+
+
 # -------------------------------------------------------------------- train --
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="stealth trainer (A6000)")
+    ap = argparse.ArgumentParser(description="stealth trainer (hardware-aware single GPU)")
     ap.add_argument("--model", required=True, help="HF id or local path of the base")
     ap.add_argument("--corpus", default="corpus/train.jsonl")
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=float, default=3.0)
-    ap.add_argument("--batch", type=int, default=8, help="packed rows per step")
-    ap.add_argument("--accum", type=int, default=2)
+    ap.add_argument("--batch", type=int, default=None, help="packed rows per step (default: auto from VRAM)")
+    ap.add_argument("--accum", type=int, default=None, help="gradient accumulation (default: auto for effective batch ~16)")
     ap.add_argument("--lr", type=float, default=1e-5, help="full FT wants a small LR")
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--max-len", type=int, default=2048, help="drop samples longer than this")
     ap.add_argument("--warmup", type=float, default=0.03)
+    ap.add_argument("--scheduler", choices=["cosine", "constant"], default="cosine")
+    ap.add_argument("--sentinel-weight", type=float, default=1.0,
+                    help="extra loss weight for sentinel marker tokens; 1.0 disables weighting")
     ap.add_argument("--save-every", type=int, default=100,
                     help="steps. An OOM with epoch-only checkpoints once cost a whole run.")
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=None, help="DataLoader workers (default: auto from CPU count)")
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--no-pack", action="store_true")
-    ap.add_argument("--grad-ckpt", action="store_true",
-                    help="not needed at 1B on 48GB; here for bigger students")
+    ap.add_argument("--grad-ckpt", action=argparse.BooleanOptionalAction, default=None,
+                    help="gradient checkpointing (default: auto on lower-VRAM GPUs)")
     ap.add_argument("--lora", type=int, default=0,
-                    help="rank>0 switches to LoRA. Default 0 = FULL fine-tune, "
-                         "because on 48GB you can afford it and LoRA blast "
-                         "radius caused real regressions on the previous model.")
+                    help="rank>0 switches to LoRA. Default 0 = FULL fine-tune.")
     ap.add_argument("--attn", default="auto",
                     choices=["auto", "flash_attention_2", "sdpa", "eager"])
     a = ap.parse_args()
@@ -245,11 +269,34 @@ def main() -> int:
         print(f"  {_green('VRAM')}      {vram:.1f} GB")
         bf16_ok = torch.cuda.is_bf16_supported()
     else:
-        print("* NO GPU VISIBLE — this harness is written for an A6000. "
-              "Running on CPU will work but will be painfully slow.")
+        print("* NO GPU VISIBLE — running on CPU fallback; training will be slow.")
         bf16_ok = False
     dtype = torch.bfloat16 if bf16_ok else torch.float32
     print(f"  {_green('dtype')}     {dtype}")
+
+    # Hardware-aware runtime defaults. Explicit CLI values always win.
+    if a.workers is None:
+        a.workers = min(8, max(0, (os.cpu_count() or 2) // 2))
+    if a.batch is None:
+        if dev != "cuda":
+            a.batch = 1
+        elif vram >= 120:
+            a.batch = 16
+        elif vram >= 70:
+            a.batch = 8
+        elif vram >= 40:
+            a.batch = 4
+        elif vram >= 20:
+            a.batch = 2
+        else:
+            a.batch = 1
+    if a.accum is None:
+        a.accum = max(1, math.ceil(16 / a.batch))
+    if a.grad_ckpt is None:
+        a.grad_ckpt = dev == "cuda" and vram < 40
+    print(f"  {_green('auto batch')} {a.batch} × accum {a.accum}")
+    print(f"  {_green('workers')}   {a.workers}")
+    print(f"  {_green('grad ckpt')} {'ON' if a.grad_ckpt else 'OFF'}")
 
     attn = a.attn
     if attn == "auto":
@@ -269,6 +316,7 @@ def main() -> int:
         return 5
     print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
     print(f"  {_green('roundtrip')} OK")
+    sentinel_pats = _sentinel_token_sets(tok)
 
     print(f"  {_green('model')}     {a.model}")
     print(_dim("  loading weights locally..."))
@@ -327,7 +375,10 @@ def main() -> int:
     total = max(1, int(steps_per_epoch * a.epochs))
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.01, betas=(0.9, 0.95))
-    sched = get_cosine_schedule_with_warmup(opt, int(a.warmup * total), total)
+    warmup_steps = int(a.warmup * total)
+    sched = (get_constant_schedule_with_warmup(opt, warmup_steps)
+             if a.scheduler == "constant"
+             else get_cosine_schedule_with_warmup(opt, warmup_steps, total))
     print("\n" + _cyan("══════════════════ TRAINING PLAN ══════════════════"))
     print(f"  {_green('epochs')}          {a.epochs}")
     print(f"  {_green('optimizer steps')} {total}")
@@ -337,6 +388,8 @@ def main() -> int:
     print(f"  {_green('sequence len')}    {a.seq_len}")
     print(f"  {_green('learning rate')}   {a.lr:.2e}")
     print(f"  {_green('warmup')}          {a.warmup:.1%}")
+    print(f"  {_green('scheduler')}       {a.scheduler}")
+    print(f"  {_green('sentinel weight')} {a.sentinel_weight:.2f}x")
     print(f"  {_green('output')}          {a.out}")
 
     os.makedirs(a.out, exist_ok=True)
@@ -357,9 +410,33 @@ def main() -> int:
         ep_loss_sum, ep_steps = 0.0, 0
         for i, (ids, lab, att) in enumerate(dl):
             ids, lab, att = ids.to(dev, non_blocking=True), lab.to(dev, non_blocking=True), att.to(dev, non_blocking=True)
-            out = model(input_ids=ids, attention_mask=att, labels=lab)
-            (out.loss / a.accum).backward()
-            run += out.loss.item()
+            out = model(input_ids=ids, attention_mask=att, labels=None)
+            shift_logits = out.logits[:, :-1, :].contiguous()
+            shift_labels = lab[:, 1:].contiguous()
+            token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=IGNORE,
+                reduction="none",
+            ).view_as(shift_labels)
+
+            valid = shift_labels.ne(IGNORE)
+            weights = torch.ones_like(token_loss)
+            if a.sentinel_weight != 1.0:
+                for b in range(lab.size(0)):
+                    label_seq = lab[b].tolist()
+                    covered: set[int] = set()
+                    for pat in sentinel_pats:
+                        covered.update(_find_subseq_positions(label_seq, pat))
+                    # token at original position j is predicted by shifted position j-1
+                    for j in covered:
+                        if j > 0 and j - 1 < weights.size(1) and lab[b, j] != IGNORE:
+                            weights[b, j - 1] = a.sentinel_weight
+
+            denom = weights[valid].sum().clamp_min(1.0)
+            loss = (token_loss * weights * valid).sum() / denom
+            (loss / a.accum).backward()
+            run += loss.item()
             nb += 1
             tok_seen += int(att.sum().item())
 
