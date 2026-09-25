@@ -42,6 +42,7 @@ import sys
 import time
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import (AutoModelForCausalLM,
                           get_cosine_schedule_with_warmup,
@@ -200,6 +201,28 @@ class Collator:
         return collate(rows, self.pad_id)
 
 
+def _find_subseq_positions(seq: list[int], pat: list[int]) -> set[int]:
+    """Return token positions covered by every exact occurrence of pat in seq."""
+    if not pat or len(pat) > len(seq):
+        return set()
+    out: set[int] = set()
+    n = len(pat)
+    for i in range(len(seq) - n + 1):
+        if seq[i:i+n] == pat:
+            out.update(range(i, i+n))
+    return out
+
+
+def _sentinel_token_sets(tok) -> list[list[int]]:
+    markers = ["<<<SQL>>>", "<<<END>>>", "<<<UNANSWERABLE>>>", "<<<CLARIFY>>>"]
+    pats = []
+    for s in markers:
+        ids = tok(s, add_special_tokens=False)["input_ids"]
+        if ids:
+            pats.append(list(ids))
+    return pats
+
+
 # -------------------------------------------------------------------- train --
 
 def main() -> int:
@@ -215,6 +238,8 @@ def main() -> int:
     ap.add_argument("--max-len", type=int, default=2048, help="drop samples longer than this")
     ap.add_argument("--warmup", type=float, default=0.03)
     ap.add_argument("--scheduler", choices=["cosine", "constant"], default="cosine")
+    ap.add_argument("--sentinel-weight", type=float, default=1.0,
+                    help="extra loss weight for sentinel marker tokens; 1.0 disables weighting")
     ap.add_argument("--save-every", type=int, default=100,
                     help="steps. An OOM with epoch-only checkpoints once cost a whole run.")
     ap.add_argument("--workers", type=int, default=None, help="DataLoader workers (default: auto from CPU count)")
@@ -291,6 +316,7 @@ def main() -> int:
         return 5
     print(f"  {_green('tokenizer')} {tok.__class__.__name__}")
     print(f"  {_green('roundtrip')} OK")
+    sentinel_pats = _sentinel_token_sets(tok)
 
     print(f"  {_green('model')}     {a.model}")
     print(_dim("  loading weights locally..."))
@@ -363,6 +389,7 @@ def main() -> int:
     print(f"  {_green('learning rate')}   {a.lr:.2e}")
     print(f"  {_green('warmup')}          {a.warmup:.1%}")
     print(f"  {_green('scheduler')}       {a.scheduler}")
+    print(f"  {_green('sentinel weight')} {a.sentinel_weight:.2f}x")
     print(f"  {_green('output')}          {a.out}")
 
     os.makedirs(a.out, exist_ok=True)
@@ -383,9 +410,33 @@ def main() -> int:
         ep_loss_sum, ep_steps = 0.0, 0
         for i, (ids, lab, att) in enumerate(dl):
             ids, lab, att = ids.to(dev, non_blocking=True), lab.to(dev, non_blocking=True), att.to(dev, non_blocking=True)
-            out = model(input_ids=ids, attention_mask=att, labels=lab)
-            (out.loss / a.accum).backward()
-            run += out.loss.item()
+            out = model(input_ids=ids, attention_mask=att, labels=None)
+            shift_logits = out.logits[:, :-1, :].contiguous()
+            shift_labels = lab[:, 1:].contiguous()
+            token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=IGNORE,
+                reduction="none",
+            ).view_as(shift_labels)
+
+            valid = shift_labels.ne(IGNORE)
+            weights = torch.ones_like(token_loss)
+            if a.sentinel_weight != 1.0:
+                for b in range(lab.size(0)):
+                    label_seq = lab[b].tolist()
+                    covered: set[int] = set()
+                    for pat in sentinel_pats:
+                        covered.update(_find_subseq_positions(label_seq, pat))
+                    # token at original position j is predicted by shifted position j-1
+                    for j in covered:
+                        if j > 0 and j - 1 < weights.size(1) and lab[b, j] != IGNORE:
+                            weights[b, j - 1] = a.sentinel_weight
+
+            denom = weights[valid].sum().clamp_min(1.0)
+            loss = (token_loss * weights * valid).sum() / denom
+            (loss / a.accum).backward()
+            run += loss.item()
             nb += 1
             tok_seen += int(att.sum().item())
 
