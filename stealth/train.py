@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""stealth :: training harness (single A6000, 48 GB)
+"""stealth :: hardware-aware single-GPU training harness
 
-Designed for one Ampere card. That is not a limitation to work around -- an
-A6000 comfortably FULL fine-tunes a ~1B model, which removes the constraint
-that caused both regressions on the previous model. LoRA was forced on us by
-2 CPU cores; here it is a choice, and the default is off.
+Designed for one CUDA GPU or CPU fallback. Runtime defaults adapt to visible
+VRAM and device capabilities while explicit CLI flags always win. Full fine-
+tuning remains the default; LoRA is an explicit choice.
 
     bf16 weights  (1B)          ~2 GB
     AdamW states + fp32 master  ~12 GB
@@ -203,28 +202,26 @@ class Collator:
 # -------------------------------------------------------------------- train --
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="stealth trainer (A6000)")
+    ap = argparse.ArgumentParser(description="stealth trainer (hardware-aware single GPU)")
     ap.add_argument("--model", required=True, help="HF id or local path of the base")
     ap.add_argument("--corpus", default="corpus/train.jsonl")
     ap.add_argument("--out", required=True)
     ap.add_argument("--epochs", type=float, default=3.0)
-    ap.add_argument("--batch", type=int, default=8, help="packed rows per step")
-    ap.add_argument("--accum", type=int, default=2)
+    ap.add_argument("--batch", type=int, default=None, help="packed rows per step (default: auto from VRAM)")
+    ap.add_argument("--accum", type=int, default=None, help="gradient accumulation (default: auto for effective batch ~16)")
     ap.add_argument("--lr", type=float, default=1e-5, help="full FT wants a small LR")
     ap.add_argument("--seq-len", type=int, default=2048)
     ap.add_argument("--max-len", type=int, default=2048, help="drop samples longer than this")
     ap.add_argument("--warmup", type=float, default=0.03)
     ap.add_argument("--save-every", type=int, default=100,
                     help="steps. An OOM with epoch-only checkpoints once cost a whole run.")
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=None, help="DataLoader workers (default: auto from CPU count)")
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--no-pack", action="store_true")
-    ap.add_argument("--grad-ckpt", action="store_true",
-                    help="not needed at 1B on 48GB; here for bigger students")
+    ap.add_argument("--grad-ckpt", action=argparse.BooleanOptionalAction, default=None,
+                    help="gradient checkpointing (default: auto on lower-VRAM GPUs)")
     ap.add_argument("--lora", type=int, default=0,
-                    help="rank>0 switches to LoRA. Default 0 = FULL fine-tune, "
-                         "because on 48GB you can afford it and LoRA blast "
-                         "radius caused real regressions on the previous model.")
+                    help="rank>0 switches to LoRA. Default 0 = FULL fine-tune.")
     ap.add_argument("--attn", default="auto",
                     choices=["auto", "flash_attention_2", "sdpa", "eager"])
     a = ap.parse_args()
@@ -245,11 +242,34 @@ def main() -> int:
         print(f"  {_green('VRAM')}      {vram:.1f} GB")
         bf16_ok = torch.cuda.is_bf16_supported()
     else:
-        print("* NO GPU VISIBLE — this harness is written for an A6000. "
-              "Running on CPU will work but will be painfully slow.")
+        print("* NO GPU VISIBLE — running on CPU fallback; training will be slow.")
         bf16_ok = False
     dtype = torch.bfloat16 if bf16_ok else torch.float32
     print(f"  {_green('dtype')}     {dtype}")
+
+    # Hardware-aware runtime defaults. Explicit CLI values always win.
+    if a.workers is None:
+        a.workers = min(8, max(0, (os.cpu_count() or 2) // 2))
+    if a.batch is None:
+        if dev != "cuda":
+            a.batch = 1
+        elif vram >= 120:
+            a.batch = 16
+        elif vram >= 70:
+            a.batch = 8
+        elif vram >= 40:
+            a.batch = 4
+        elif vram >= 20:
+            a.batch = 2
+        else:
+            a.batch = 1
+    if a.accum is None:
+        a.accum = max(1, math.ceil(16 / a.batch))
+    if a.grad_ckpt is None:
+        a.grad_ckpt = dev == "cuda" and vram < 40
+    print(f"  {_green('auto batch')} {a.batch} × accum {a.accum}")
+    print(f"  {_green('workers')}   {a.workers}")
+    print(f"  {_green('grad ckpt')} {'ON' if a.grad_ckpt else 'OFF'}")
 
     attn = a.attn
     if attn == "auto":
