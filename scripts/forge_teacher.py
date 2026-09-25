@@ -18,7 +18,7 @@ def main() -> int:
     ap.add_argument("--teacher", default="mistralai/Devstral-Small-2507")
     ap.add_argument("--dsn", default=os.environ.get(
         "STEALTH_ADMIN_DSN",
-        "host=/agent/workspace/pgrun user=stealth dbname=postgres"))
+        f"host={os.path.join(os.getcwd(), 'pgrun')} user=stealth dbname=postgres"))
     ap.add_argument("--out", default="corpus/sql_train.jsonl")
     ap.add_argument("--rejects", default="corpus/sql_rejects.jsonl")
     ap.add_argument("--teacher-per-schema", type=int, default=32)
