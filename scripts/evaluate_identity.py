@@ -212,7 +212,8 @@ def main() -> int:
             "expected": case["expected"],
             "output": answer,
             "judge": verdict,
-            "judge_raw": judge_raw,\n            "claim_extraction": extract_raw,
+            "judge_raw": judge_raw,
+            "claim_extraction": extract_raw,
         })
 
         icon = "✓" if verdict["pass"] else ("~" if verdict["score"] == 0.5 else "✗")
