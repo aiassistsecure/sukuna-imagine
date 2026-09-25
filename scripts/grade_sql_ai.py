@@ -16,7 +16,7 @@ reference query?
 Usage:
   python scripts/grade_sql_ai.py \
     --eval eval_sql_v6_protocol.json \
-    --judge deepseek-ai/deepseek-coder-33b-instruct \
+    --judge deepseek-ai/deepseek-coder-6.7b-instruct \
     --out eval_sql_v6_ai.json
 """
 from __future__ import annotations
@@ -95,7 +95,7 @@ def extract_json(text: str) -> dict:
 def main() -> int:
     ap=argparse.ArgumentParser()
     ap.add_argument("--eval",required=True)
-    ap.add_argument("--judge",default="deepseek-ai/deepseek-coder-33b-instruct")
+    ap.add_argument("--judge",default="deepseek-ai/deepseek-coder-6.7b-instruct")
     ap.add_argument("--out",default="eval_sql_ai.json")
     ap.add_argument("--max-new",type=int,default=128)
     ap.add_argument("--only-mismatches",action="store_true",
