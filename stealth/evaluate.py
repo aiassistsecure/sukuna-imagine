@@ -99,6 +99,7 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
     tally = {"n": 0, "parseable": 0, "raw_sql_parseable": 0,
              "executable": 0, "correct": 0,
              "refusal": 0, "unparseable_block": 0,
+             "strict_protocol": 0, "protocol_extra_text": 0,
              "invented_relation": 0, "invented_column": 0, "wrong_answer": 0}
     per_schema: dict[str, dict[str, int]] = {}
     details = []
@@ -138,6 +139,15 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
                 else:
                     print(f"  {_red('RAW SQL INVALID')} no parseable SELECT/WITH found")
             continue
+        strict_protocol = text.strip() == blk.raw.strip()
+        if strict_protocol:
+            tally["strict_protocol"] += 1
+        else:
+            tally["protocol_extra_text"] += 1
+            if verbose:
+                print(f"\n{_red('✗ PROTOCOL EXTRA TEXT')} {_cyan(key)}")
+                print(f"  {_yellow('OUT')} {_preview(text)}")
+
         if blk.kind != "SQL":
             tally["refusal"] += 1
             details.append({**row, "verdict": f"refusal:{blk.kind}",
@@ -187,7 +197,7 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
     tally["execution_accuracy"] = round(tally["correct"] / n, 4)
     tally["parse_rate"] = round(tally["parseable"] / n, 4)
     tally["raw_sql_parse_rate"] = round(tally["raw_sql_parseable"] / n, 4)
-    tally["protocol_compliance"] = round((tally["n"] - tally["unparseable_block"]) / n, 4)
+    tally["protocol_compliance"] = round(tally["strict_protocol"] / n, 4)
     tally["execute_rate"] = round(tally["executable"] / n, 4)
     tally["per_schema"] = {
         k: {**v, "acc": round(v["correct"] / max(v["n"], 1), 4)}
@@ -378,6 +388,7 @@ def main() -> int:
     print(f"  invented column     {t['invented_column']}")
     print(f"  refusals            {t['refusal']}")
     print(f"  unparseable block   {t['unparseable_block']}")
+    print(f"  protocol extra text {t['protocol_extra_text']}")
     print("\n  per schema:")
     for k, v in sorted(t["per_schema"].items()):
         flag = "  <- HELD OUT" if k in HELDOUT_KEYS else ""
