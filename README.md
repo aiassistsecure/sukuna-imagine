@@ -4,7 +4,7 @@
 
 ### A model small enough to run on your laptop. Strict enough to trust with your database.
 
-**Natural language in. Correct PostgreSQL out. ~1B parameters. No GPU. No API key. No metered inference.**
+**Natural language in. Correct PostgreSQL out — reads and writes. ~1B parameters. No GPU. No API key. No metered inference.**
 
 [![gate](https://img.shields.io/badge/execution_gate-39%2F39_live_PostgreSQL-3ecf8e?style=flat-square)](tests/test_gate.py)
 [![verifier](https://img.shields.io/badge/verifier-PostgreSQL_16-336791?style=flat-square)](stealth/gate.py)
@@ -34,7 +34,7 @@ We answer differently. **We run it.**
                           ┌─────────────────────────────┐
   candidate SQL  ───────► │  L0  real PostgreSQL parser │  not a regex
                           ├─────────────────────────────┤
-                          │  L1  read-only + bounded    │  no writes, no sleeps
+                          │  L1  bounded, writes in txn  │  writes roll back, no sleeps
                           ├─────────────────────────────┤
                           │  L2  EXPLAIN on live schema │  hallucinations die HERE
                           ├─────────────────────────────┤
@@ -217,7 +217,7 @@ python scripts/merge_corpus.py \
 ```
 
 Identity is deliberately small. It teaches the name **Imagine**, Interchained
-provenance, local-first purpose, schema-grounding, read-only behavior, and the
+provenance, local-first purpose, schema-grounding, read-write behavior, and the
 refuse/clarify contract. SQL capability still comes overwhelmingly from the
 execution-gated corpus.
 
