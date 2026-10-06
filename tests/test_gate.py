@@ -20,7 +20,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from stealth.gate import Gate, Level, check_parse, check_safety  # noqa: E402
+from stealth.gate import Gate, Level, check_parse, check_safety, check_safety_write  # noqa: E402
+from stealth.schema import check_schema, SHOP_SCHEMA  # noqa: E402
 from stealth.sentinel import wrap, extract, extract_one, sql_of   # noqa: E402
 
 DSN = os.environ.get(
@@ -131,8 +132,36 @@ AGREE_CASES = [
      "(SELECT customer_id FROM orders WHERE total > 400) ORDER BY name", True),
 ]
 
-SENTINEL_CASES = [
-    ("plain sql block", wrap("SELECT 1"), "SELECT 1"),
+# Write path: L0 parse + L1 safety(write) + L2 schema bind. Pure functions,
+# no database needed. R2 applies: every must-accept has a must-reject twin.
+# (label, sql, must_pass_safety, must_pass_schema)
+WRITE_CASES = [
+    ("insert single row",
+     "INSERT INTO customers (name, city) VALUES ('Zed', 'Orlando')", True, True),
+    ("insert with reordered columns",
+     "INSERT INTO customers (city, name) VALUES ('Orlando', 'Zed')", True, True),
+    ("update with predicate",
+     "UPDATE products SET price = 10 WHERE category = 'swag'", True, True),
+    ("delete with predicate",
+     "DELETE FROM orders WHERE status = 'refunded'", True, True),
+    ("hallucinated table",
+     "INSERT INTO nosuch (name) VALUES ('X')", True, False),
+    ("hallucinated column on insert",
+     "INSERT INTO customers (nosuchcol) VALUES ('X')", True, False),
+    ("hallucinated column on update",
+     "UPDATE products SET nosuchcol = 1 WHERE id = 1", True, False),
+    ("hallucinated column in where",
+     "DELETE FROM orders WHERE nosuchcol = 1", True, False),
+    ("DDL is not a write",
+     "DROP TABLE customers", False, False),
+    ("multi-statement is not one write",
+     "DELETE FROM orders WHERE id = 1; DELETE FROM orders WHERE id = 2",
+     False, False),
+    ("select is not a write",
+     "SELECT * FROM customers", False, False),
+]
+
+SENTINEL_CASES = [    ("plain sql block", wrap("SELECT 1"), "SELECT 1"),
     ("sql containing semicolons and quotes",
      wrap("SELECT 'a;b', \"weird col\" FROM t WHERE x = 'it''s'"),
      "SELECT 'a;b', \"weird col\" FROM t WHERE x = 'it''s'"),
@@ -164,6 +193,21 @@ def main() -> int:
     print(f"  [{'ok  ' if ok else 'FAIL'}] {'UNANSWERABLE block is recognised':46} -> "
           f"{b.kind if b else None}")
 
+    print("\n== write path L0/L1/L2 (no database) ==")
+    for label, sql, must_safety, must_schema in WRITE_CASES:
+        ok, _, kinds = check_parse(sql)
+        sok, sreason = check_safety_write(sql, kinds) if ok else (False, "parse failed")
+        ok_s = (sok == must_safety)
+        fails += not ok_s
+        print(f"  [{'ok  ' if ok_s else 'FAIL'}] [L1] {label:42} "
+              f"{'pass' if sok else 'stop':4} {sreason[:40]}")
+        if must_safety:
+            cok, creason = check_schema(sql, SHOP_SCHEMA)
+            ok_c = (cok == must_schema)
+            fails += not ok_c
+            print(f"  [{'ok  ' if ok_c else 'FAIL'}] [L2] {label:42} "
+                  f"{'pass' if cok else 'stop':4} {creason[:40]}")
+
     print("\n== gate levels (live PostgreSQL) ==")
     g = Gate(DSN)
     try:
@@ -191,7 +235,7 @@ def main() -> int:
               f"{'agree' if agreed else 'differ':6} {r.reason[:44]}")
 
     g.close()
-    total = len(SENTINEL_CASES) + 1 + len(CASES) + len(AGREE_CASES)
+    total = len(SENTINEL_CASES) + 1 + len(CASES) + len(AGREE_CASES) + 2 * len(WRITE_CASES)
     print(f"\n{total - fails}/{total} behaved as specified")
     if fails:
         print("GATE IS WRONG — fix it before forging any corpus")
