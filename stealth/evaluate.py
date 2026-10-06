@@ -38,7 +38,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from stealth.forge import build_prompt, materialise, _swap_db      # noqa: E402
+from stealth.forge import build_prompt, materialise, _swap_db, schema_catalog  # noqa: E402
 from stealth.gate import Gate, Level, check_parse                  # noqa: E402
 from stealth.schemas import CATALOG, HELDOUT_KEYS, TRAIN_KEYS, get  # noqa: E402
 from stealth.sentinel import extract_one                            # noqa: E402
@@ -107,7 +107,7 @@ def eval_rows(rows, generate, admin_dsn: str, style: str = "ddl",
     for row in rows:
         key = row["schema_key"]
         if key not in gates:
-            g = Gate(_swap_db(admin_dsn, f"stealth_{key}"))
+            g = Gate(_swap_db(admin_dsn, f"stealth_{key}"), schema=schema_catalog(CATALOG[key]))
             g.connect()
             gates[key] = g
         gate = gates[key]
