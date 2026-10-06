@@ -331,7 +331,8 @@ class Gate:
 
     # -- write pipeline -----------------------------------------------------
     def run_write(self, sql: str, reference_sql: str, fresh_dsn,
-                  tables: list[str], catalog: dict | None = None) -> GateResult:
+                  tables: list[tuple[str, list[str]]],
+                  catalog: dict | None = None) -> GateResult:
         """Verify a write by effect, not by result set.
 
         NEDB is append-only: no transactions, no rollback, no truncate. So a
@@ -395,8 +396,15 @@ class Gate:
         return done(True, Level.AGREE, "ok", result_digest=cand_state)
 
     def _run_write_side(self, dsn: str, sql: str,
-                        tables: list[str]) -> tuple[bool, str, str | None]:
-        """Execute one write on a fresh database; digest the end state."""
+                        tables: list[tuple[str, list[str]]]) -> tuple[bool, str, str | None]:
+        """Execute one write on a fresh database; digest the end state.
+
+        `tables` is (quoted_name, [columns_to_keep]) per table. Auto-generated
+        id columns are excluded by the caller: NEDB's `_id` is not
+        deterministic across fresh databases, so two identical writes would
+        digest differently if ids were included. The effect lives in the
+        business columns.
+        """
         try:
             con = psycopg2.connect(dsn)
             con.autocommit = True
@@ -418,9 +426,10 @@ class Gate:
             con = psycopg2.connect(dsn)
             try:
                 h = hashlib.sha256()
-                for t in tables:
+                for t, keep in tables:
+                    cols = ", ".join(keep) if keep else "*"
                     with con.cursor() as cur:
-                        cur.execute(f"SELECT * FROM {t}")
+                        cur.execute(f"SELECT {cols} FROM {t}")
                         rows = cur.fetchmany(self.max_rows + 1)
                         if len(rows) > self.max_rows:
                             return False, f"table {t} exceeded max_rows", None
