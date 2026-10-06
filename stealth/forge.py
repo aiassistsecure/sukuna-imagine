@@ -453,6 +453,14 @@ def write_template_candidates(schema: Schema, rng: random.Random,
         singular = t.name[:-1] if t.name.endswith("s") else t.name
         n0 = len(out)
 
+        def synth_val(col, base_val):
+            """Generate a synthetic variant of a seed value for SET clauses."""
+            if isinstance(base_val, (int, float)) and not isinstance(base_val, bool):
+                return base_val + rng.choice([1, -1, 10, -10, 100, 2, 5, 50])
+            elif isinstance(base_val, str):
+                return base_val + rng.choice([" Jr", " II", " (updated)", " X", " Pro"])
+            return base_val
+
         def cap() -> bool:
             return len(out) - n0 >= per_table
 
@@ -461,7 +469,7 @@ def write_template_candidates(schema: Schema, rng: random.Random,
             if cap():
                 break
             variants = [row]
-            for _ in range(11):
+            for _ in range(24):
                 lst = list(row)
                 i = rng.randrange(len(lst))
                 v = lst[i]
@@ -501,16 +509,20 @@ def write_template_candidates(schema: Schema, rng: random.Random,
                 for pick in colvals.get(tc.name, []):
                     if cap():
                         break
-                    new_v = rng.choice(colvals[c.name])
-                    out.append(Candidate(
-                        S.key,
-                        f"Set {c.name} to {_lit(new_v)} for {t.name} "
-                        f"where {tc.name} is {_lit(pick)}.",
-                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
-                        f"WHERE {tc.quoted} = {_lit(pick)}",
-                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
-                        f"WHERE {tc.quoted} IN ({_lit(pick)})",
-                        "update_where", difficulty=2, is_write=True))
+                    base_v = rng.choice(colvals[c.name])
+                    for new_v in [base_v, synth_val(c, base_v),
+                                  synth_val(c, base_v)]:
+                        if cap():
+                            break
+                        out.append(Candidate(
+                            S.key,
+                            f"Set {c.name} to {_lit(new_v)} for {t.name} "
+                            f"where {tc.name} is {_lit(pick)}.",
+                            f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                            f"WHERE {tc.quoted} = {_lit(pick)}",
+                            f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                            f"WHERE {tc.quoted} IN ({_lit(pick)})",
+                            "update_where", difficulty=2, is_write=True))
         for c in textual:
             if cap():
                 break
@@ -587,6 +599,54 @@ def write_template_candidates(schema: Schema, rng: random.Random,
                             f"{c1.quoted} = {_lit(v1)} "
                             f"WHERE {tc.quoted} IN ({_lit(pick)})",
                             "update_where", difficulty=3, is_write=True))
+
+        # --- updates with OR predicates ----------------------------------
+        if textual and numeric and not cap():
+            for c in numeric[:2]:
+                if cap() or not colvals.get(c.name):
+                    break
+                for i, tc1 in enumerate(textual[:2]):
+                    if cap():
+                        break
+                    for tc2 in textual[i+1:i+2]:
+                        if cap():
+                            break
+                        p1 = rng.choice(colvals[tc1.name]) if colvals.get(tc1.name) else None
+                        p2 = rng.choice(colvals[tc2.name]) if colvals.get(tc2.name) else None
+                        if p1 is None or p2 is None:
+                            continue
+                        new_v = rng.choice(colvals[c.name])
+                        out.append(Candidate(
+                            S.key,
+                            f"Set {c.name} to {_lit(new_v)} for {t.name} "
+                            f"where {tc1.name} is {_lit(p1)} or {tc2.name} "
+                            f"is {_lit(p2)}.",
+                            f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                            f"WHERE {tc1.quoted} = {_lit(p1)} "
+                            f"OR {tc2.quoted} = {_lit(p2)}",
+                            f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                            f"WHERE {tc2.quoted} = {_lit(p2)} "
+                            f"OR {tc1.quoted} = {_lit(p1)}",
+                            "update_where", difficulty=3, is_write=True))
+
+        # --- deletes with OR predicates ----------------------------------
+        if len(textual) >= 2 and not cap():
+            tc1, tc2 = textual[0], textual[1]
+            for p1 in colvals.get(tc1.name, [])[:3]:
+                if cap():
+                    break
+                for p2 in colvals.get(tc2.name, [])[:3]:
+                    if cap():
+                        break
+                    out.append(Candidate(
+                        S.key,
+                        f"Remove {t.name} where {tc1.name} is {_lit(p1)} "
+                        f"or {tc2.name} is {_lit(p2)}.",
+                        f"DELETE FROM {tq} WHERE {tc1.quoted} = {_lit(p1)} "
+                        f"OR {tc2.quoted} = {_lit(p2)}",
+                        f"DELETE FROM {tq} WHERE {tc2.quoted} = {_lit(p2)} "
+                        f"OR {tc1.quoted} = {_lit(p1)}",
+                        "delete_where", difficulty=3, is_write=True))
 
         # --- relational writes via declared relationships -----------------
         for parent_name, fk_name in rel_map.get(t.name, []):
