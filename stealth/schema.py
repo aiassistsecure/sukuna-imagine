@@ -394,4 +394,49 @@ def check_schema(sql: str, catalog: dict | None = None) -> tuple[bool, str]:
 def _validate_statement(stmt, catalog):
     if type(stmt).__name__ == "SelectStmt":
         _validate_select(stmt, catalog, {})
+    elif type(stmt).__name__ == "InsertStmt":
+        _validate_insert(stmt, catalog)
+    elif type(stmt).__name__ == "UpdateStmt":
+        _validate_update(stmt, catalog)
+    elif type(stmt).__name__ == "DeleteStmt":
+        _validate_delete(stmt, catalog)
     # Anything else was already stopped at L1; stay permissive here.
+
+
+def _write_target(stmt, catalog) -> tuple[str, dict, list]:
+    """Resolve the target table of a write. Returns (name, cols, from_tables)."""
+    rel = getattr(stmt, "relation", None)
+    name = getattr(rel, "relname", None) if rel is not None else None
+    if not name or name not in catalog:
+        raise SchemaError(f'relation "{name}" does not exist')
+    return name, catalog[name], [name]
+
+
+def _validate_insert(stmt, catalog):
+    name, cols, from_tables = _write_target(stmt, catalog)
+    scope = {name: cols}
+    for res in stmt.cols or []:
+        col = getattr(res, "name", None)
+        if col and col not in cols:
+            raise SchemaError(f'column "{col}" of relation "{name}" does not exist')
+    # INSERT ... SELECT: validate the source query too.
+    sel = getattr(stmt, "selectStmt", None)
+    if sel is not None and type(sel).__name__ == "SelectStmt":
+        _validate_select(sel, catalog, {})
+
+
+def _validate_update(stmt, catalog):
+    name, cols, from_tables = _write_target(stmt, catalog)
+    scope = {name: cols}
+    for res in stmt.targetList or []:
+        col = getattr(res, "name", None)
+        if col and col not in cols:
+            raise SchemaError(f'column "{col}" of relation "{name}" does not exist')
+        _walk_expr(getattr(res, "val", None), scope, from_tables, None, catalog)
+    _walk_expr(getattr(stmt, "whereClause", None), scope, from_tables, None, catalog)
+
+
+def _validate_delete(stmt, catalog):
+    name, cols, from_tables = _write_target(stmt, catalog)
+    scope = {name: cols}
+    _walk_expr(getattr(stmt, "whereClause", None), scope, from_tables, None, catalog)

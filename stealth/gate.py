@@ -30,6 +30,14 @@ Why not string comparison of SQL? Because `SELECT count(*)` and
 `SELECT count(id)` are different strings and the same answer, while
 `WHERE status='paid'` and `WHERE status='Paid'` are nearly the same string and
 different answers. Strings measure the wrong thing.
+
+THE WRITE PATH (run_write). Reads are verified by answer; writes are verified
+by effect. NEDB is append-only -- no transactions, no rollback, no truncate --
+so a write cannot be tested in place and unwound. Each side gets a FRESH
+database from an identical starting state; the candidate is admitted only when
+both end in identical state. L1 runs in write mode (exactly one
+INSERT/UPDATE/DELETE, same denylist, no DDL). The append-only history is what
+makes the comparison sound.
 """
 from __future__ import annotations
 
@@ -57,6 +65,10 @@ class Level(IntEnum):
 
 # Statement node types libpg_query reports for read-only queries.
 _READ_ONLY_STMTS = {"SelectStmt"}
+
+# Statement node types for the write path. Exactly one of these, no DDL,
+# no multi-statements. The write gate verifies by effect, not by result set.
+_WRITE_STMTS = {"InsertStmt", "UpdateStmt", "DeleteStmt"}
 
 # Substring denylist applied to the LOWERCASED sql. Coarse on purpose: this is
 # a corpus forge, not a security boundary. The real boundary is the database
@@ -116,6 +128,23 @@ def check_safety(sql: str, kinds: list[str]) -> tuple[bool, str]:
         return False, f"expected exactly 1 statement, got {len(kinds)}"
     if kinds[0] not in _READ_ONLY_STMTS:
         return False, f"not a read-only statement: {kinds[0]}"
+    low = sql.lower()
+    for bad in _DENY:
+        if bad in low:
+            return False, f"denylisted construct: {bad.strip()!r}"
+    return True, "ok"
+
+
+def check_safety_write(sql: str, kinds: list[str]) -> tuple[bool, str]:
+    """L1 for the write path: exactly one INSERT/UPDATE/DELETE.
+
+    Same denylist as the read path. DDL stays out -- the write gate is for
+    DML only. Multi-statements stay out -- one write, one verification.
+    """
+    if len(kinds) != 1:
+        return False, f"expected exactly 1 statement, got {len(kinds)}"
+    if kinds[0] not in _WRITE_STMTS:
+        return False, f"not a write statement: {kinds[0]}"
     low = sql.lower()
     for bad in _DENY:
         if bad in low:
@@ -299,3 +328,117 @@ class Gate:
 
         return done(True, Level.AGREE, "ok", rowcount=len(rows),
                     result_digest=digest, columns=cols, sample=rows[:5])
+
+    # -- write pipeline -----------------------------------------------------
+    def run_write(self, sql: str, reference_sql: str, fresh_dsn,
+                  tables: list[tuple[str, list[str]]],
+                  catalog: dict | None = None) -> GateResult:
+        """Verify a write by effect, not by result set.
+
+        NEDB is append-only: no transactions, no rollback, no truncate. So a
+        write cannot be tested in place and unwound. Instead each side gets a
+        FRESH database: `fresh_dsn(tag)` must return a DSN for a newly
+        materialised database (`"cand"` for the candidate, `"ref"` for the
+        reference). Both start from identical state; the write is admitted
+        only if both end in identical state.
+
+        This is the write analogue of L4: the candidate and the reference
+        agree when they produce the same effect on the same starting state.
+        The append-only history is what makes the comparison sound -- no
+        write can be lost or silently reordered between the two runs.
+        """
+        import time
+        t0 = time.perf_counter()
+
+        def done(ok, level, reason, **kw):
+            return GateResult(ok=ok, level=level, reason=reason,
+                              elapsed_ms=round((time.perf_counter() - t0) * 1000, 2),
+                              **kw)
+
+        ok, reason, kinds = check_parse(sql)
+        if not ok:
+            return done(False, Level.REJECTED, f"L0 parse: {reason}")
+
+        ok, reason = check_safety_write(sql, kinds)
+        if not ok:
+            return done(False, Level.PARSE, f"L1 safety: {reason}")
+
+        ok, reason = check_schema(sql, catalog if catalog is not None else self.schema)
+        if not ok:
+            return done(False, Level.SAFETY, f"L2 bind: {reason}")
+
+        # Reference gets the same three levels. A reference that cannot pass
+        # the gate is a generator bug, not a candidate bug.
+        rok, rreason, rkinds = check_parse(reference_sql)
+        if not rok:
+            return done(False, Level.PARSE, f"REFERENCE L0 parse: {rreason}")
+        rok, rreason = check_safety_write(reference_sql, rkinds)
+        if not rok:
+            return done(False, Level.PARSE, f"REFERENCE L1 safety: {rreason}")
+        rok, rreason = check_schema(reference_sql, catalog if catalog is not None else self.schema)
+        if not rok:
+            return done(False, Level.SAFETY, f"REFERENCE L2 bind: {rreason}")
+
+        ok, reason, cand_state = self._run_write_side(fresh_dsn("cand"), sql, tables)
+        if not ok:
+            return done(False, Level.BIND, f"L3 execute: {reason}")
+
+        ok, reason, ref_state = self._run_write_side(fresh_dsn("ref"), reference_sql, tables)
+        if not ok:
+            return done(False, Level.EXECUTE,
+                        f"L4 agree: REFERENCE write failed: {reason}")
+
+        if cand_state != ref_state:
+            return done(False, Level.EXECUTE,
+                        f"L4 agree: state mismatch "
+                        f"(candidate {cand_state} vs reference {ref_state})")
+
+        return done(True, Level.AGREE, "ok", result_digest=cand_state)
+
+    def _run_write_side(self, dsn: str, sql: str,
+                        tables: list[tuple[str, list[str]]]) -> tuple[bool, str, str | None]:
+        """Execute one write on a fresh database; digest the end state.
+
+        `tables` is (quoted_name, [columns_to_keep]) per table. Auto-generated
+        id columns are excluded by the caller: NEDB's `_id` is not
+        deterministic across fresh databases, so two identical writes would
+        digest differently if ids were included. The effect lives in the
+        business columns.
+        """
+        try:
+            con = psycopg2.connect(dsn)
+            con.autocommit = True
+            try:
+                with con.cursor() as cur:
+                    cur.execute("SET statement_timeout = %s",
+                                (self.statement_timeout_ms,))
+                    cur.execute(sql)
+            finally:
+                con.close()
+        except psycopg2.Error as e:
+            msg = (e.pgerror or str(e)).strip().splitlines()
+            return False, msg[0] if msg else str(e), None
+
+        # Digest every table. Unordered: without ORDER BY the engine makes no
+        # ordering promise, and two equivalent writes may land rows in a
+        # different physical sequence.
+        try:
+            con = psycopg2.connect(dsn)
+            try:
+                h = hashlib.sha256()
+                for t, keep in tables:
+                    cols = ", ".join(keep) if keep else "*"
+                    with con.cursor() as cur:
+                        cur.execute(f"SELECT {cols} FROM {t}")
+                        rows = cur.fetchmany(self.max_rows + 1)
+                        if len(rows) > self.max_rows:
+                            return False, f"table {t} exceeded max_rows", None
+                        h.update(digest_rows([tuple(r) for r in rows],
+                                            ordered=False).encode())
+                        h.update(b"\x1f")
+            finally:
+                con.close()
+        except psycopg2.Error as e:
+            msg = (e.pgerror or str(e)).strip().splitlines()
+            return False, f"state dump: {msg[0] if msg else str(e)}", None
+        return True, "ok", h.hexdigest()[:32]

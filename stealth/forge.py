@@ -24,6 +24,11 @@ Two sources of candidate SQL, and they are complementary:
 The teacher path is deliberately OPTIONAL. With execution gating in place, a
 weaker teacher costs throughput, not correctness, so the pipeline must work
 with no teacher at all.
+
+READ/WRITE. The forge mints both. Read candidates go through the gate's
+`run()` (verified by answer); write candidates (INSERT/UPDATE/DELETE) go
+through `run_write()` (verified by effect on fresh databases). The corpus is
+read/write because the model being trained is.
 """
 from __future__ import annotations
 
@@ -150,6 +155,7 @@ class Candidate:
     reference_sql: str | None   # None -> gate stops at L3 EXECUTE
     kind: str                   # template family, or "teacher"
     difficulty: int = 1
+    is_write: bool = False      # True -> verified by run_write (effect), not run (answer)
 
 
 def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
@@ -353,6 +359,107 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
     return out
 
 
+def _lit(v) -> str:
+    """Render a Python value as a SQL literal."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def _seed_col_values(table) -> dict[str, list]:
+    """Map column name -> distinct non-null seed values for that column."""
+    insertable = [c for c in table.columns if "serial" not in c.type.lower()]
+    vals: dict[str, list] = {c.name: [] for c in insertable}
+    for row in table.rows:
+        for c, v in zip(insertable, row):
+            if v is not None and v not in vals[c.name]:
+                vals[c.name].append(v)
+    return vals
+
+
+def write_template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
+    """Deterministic write generators. Perfect labels by construction.
+
+    Every generator emits a candidate and an equivalent-but-differently-
+    written reference. The gate verifies by EFFECT: both run on fresh
+    databases from identical state, and the pair is admitted only when both
+    end in identical state. Serial columns are omitted from INSERTs -- the
+    database generates them, identically on both fresh sides.
+    """
+    out: list[Candidate] = []
+    S = schema
+
+    for t in S.tables:
+        if not t.rows:
+            continue
+        tq = t.quoted
+        insertable = [c for c in t.columns if "serial" not in c.type.lower()]
+        if not insertable:
+            continue
+        colvals = _seed_col_values(t)
+        numeric = [c for c in insertable
+                   if any(k in c.type for k in ("int", "numeric"))]
+        textual = [c for c in insertable if c.type.startswith("text")]
+
+        # --- insert a single row -----------------------------------------
+        # Candidate lists columns in schema order; reference reorders them.
+        # Same row, different text.
+        row = rng.choice(t.rows)
+        vals = [_lit(v) for v in row]
+        cols_fwd = ", ".join(c.quoted for c in insertable)
+        vals_fwd = ", ".join(vals)
+        order = list(range(len(insertable)))
+        rng.shuffle(order)
+        cols_rev = ", ".join(insertable[i].quoted for i in order)
+        vals_rev = ", ".join(vals[i] for i in order)
+        desc = ", ".join(f"{c.name} {_lit(v)}" for c, v in list(zip(insertable, row))[:2])
+        # crude singular: "customers" -> "customer", "members" -> "member"
+        singular = t.name[:-1] if t.name.endswith("s") else t.name
+        out.append(Candidate(
+            S.key,
+            f"Add a new {singular} with {desc}.",
+            f"INSERT INTO {tq} ({cols_fwd}) VALUES ({vals_fwd})",
+            f"INSERT INTO {tq} ({cols_rev}) VALUES ({vals_rev})",
+            "insert_single", difficulty=2, is_write=True))
+
+        # --- update with a predicate --------------------------------------
+        # Candidate uses *= form; reference uses the expanded form.
+        for c in numeric[:1]:
+            for tc in textual[:1]:
+                if not colvals.get(tc.name):
+                    continue
+                pick = rng.choice(colvals[tc.name])
+                new_v = rng.choice(colvals[c.name])
+                out.append(Candidate(
+                    S.key,
+                    f"Set {c.name} to {_lit(new_v)} for {t.name} "
+                    f"where {tc.name} is {_lit(pick)}.",
+                    f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                    f"WHERE {tc.quoted} = {_lit(pick)}",
+                    f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                    f"WHERE {tc.quoted} IN ({_lit(pick)})",
+                    "update_where", difficulty=2, is_write=True))
+
+        # --- delete with a predicate ---------------------------------------
+        for tc in textual[:1]:
+            if not colvals.get(tc.name):
+                continue
+            pick = rng.choice(colvals[tc.name])
+            out.append(Candidate(
+                S.key,
+                f"Remove {t.name} where {tc.name} is {_lit(pick)}.",
+                f"DELETE FROM {tq} WHERE {tc.quoted} = {_lit(pick)}",
+                f"DELETE FROM {tq} WHERE {tc.quoted} IN ({_lit(pick)})",
+                "delete_where", difficulty=2, is_write=True))
+
+    rng.shuffle(out)
+    return out
+
+
 def teacher_candidates(schema: Schema, rng: random.Random, generate,
                        limit: int = 32, prompt_style: str = "ddl") -> tuple[list[Candidate], int]:
     """Ask a larger model for alternate SQL, then let L4 decide whether it lives.
@@ -459,9 +566,51 @@ def _gate_for(schema_key: str) -> Gate:
     return gates[schema_key]
 
 
+def _catalog_dict(schema: Schema) -> dict:
+    """Build the gate's catalog dict from a Schema. Types are simplified to
+    the gate's vocabulary (int/text/numeric/date/timestamp/bool)."""
+    from .schema import _PG_TYPE_MAP
+    out = {}
+    for t in schema.tables:
+        cols = {}
+        for c in t.columns:
+            base = c.type.split()[0].lower()
+            cols[c.name] = _PG_TYPE_MAP.get(base, base)
+        out[t.name] = cols
+    return out
+
+
+def _fresh_dsn(schema_key: str, tag: str) -> str:
+    """Materialise a fresh database for one side of a write verification.
+
+    Fixed names per worker+tag: materialise drops first, so nothing
+    accumulates across candidates.
+    """
+    admin_dsn = _WORKER["admin_dsn"]
+    dbname = f"stealth_{schema_key}_w_{os.getpid()}_{tag}"
+    materialise(CATALOG[schema_key], admin_dsn, dbname)
+    return _swap_db(admin_dsn, dbname)
+
+
 def _process(c: Candidate) -> dict:
     g = _gate_for(c.schema_key)
-    r = g.run(c.sql, reference_sql=c.reference_sql)
+    if c.is_write:
+        schema = CATALOG[c.schema_key]
+        # Keep only business columns for the state digest: serial/id
+        # columns are auto-generated and not deterministic across fresh
+        # databases, so including them would fail identical writes.
+        tables = []
+        for t in schema.tables:
+            keep = [col.quoted for col in t.columns
+                    if "serial" not in col.type.lower()
+                    and col.name not in ("id", "_id")]
+            tables.append((t.quoted, keep))
+        catalog = _catalog_dict(schema)
+        r = g.run_write(c.sql, c.reference_sql,
+                        fresh_dsn=lambda tag: _fresh_dsn(c.schema_key, tag),
+                        tables=tables, catalog=catalog)
+    else:
+        r = g.run(c.sql, reference_sql=c.reference_sql)
     rec = {
         "schema_key": c.schema_key,
         "question": c.question,
@@ -505,6 +654,8 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
     for k in keys:
         templ = template_candidates(CATALOG[k], rng)
         cands.extend(templ)
+        writes = write_template_candidates(CATALOG[k], rng)
+        cands.extend(writes)
         teacher_n = 0
         if teacher_generate is not None and teacher_per_schema > 0:
             taught, malformed = teacher_candidates(
@@ -515,7 +666,7 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
             teacher_n = len(taught)
             teacher_malformed += malformed
         suffix = f" + {teacher_n} teacher" if teacher_generate is not None else ""
-        print(f"  {k:12} {len(templ):5d} template{suffix}")
+        print(f"  {k:12} {len(templ):5d} template + {len(writes):3d} write{suffix}")
     print(f"* {len(cands)} candidates, {workers} workers")
 
     t0 = time.perf_counter()
