@@ -241,6 +241,17 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
         # ordering, or predicate semantics. Generate many equivalent forms so
         # L4 teaches the *result*, not one memorised query string.
         for c in numeric:
+            # Skip min/max when the column has no non-null seed values: on an
+            # empty (or all-NULL) column, SELECT min(x) returns one NULL row
+            # while the ORDER BY ... LIMIT 1 reference returns zero rows.
+            # Seed rows omit serial columns, so index into the non-serial list.
+            nonserial = [cc for cc in cols if "serial" not in cc.type.lower()]
+            if t.rows and c.name in [cc.name for cc in nonserial]:
+                idx = [cc.name for cc in nonserial].index(c.name)
+                if not any(r[idx] is not None for r in t.rows):
+                    continue
+            elif not t.rows:
+                continue
             out.extend([
                 Candidate(
                     S.key,
@@ -405,17 +416,27 @@ def _seed_col_values(table) -> dict[str, list]:
     return vals
 
 
-def write_template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
-    """Deterministic write generators. Perfect labels by construction.
+def write_template_candidates(schema: Schema, rng: random.Random,
+                              per_table: int = 170) -> list[Candidate]:
+    """Deterministic write generators at scale. Perfect labels by construction.
 
     Every generator emits a candidate and an equivalent-but-differently-
     written reference. The gate verifies by EFFECT: both run on fresh
     databases from identical state, and the pair is admitted only when both
     end in identical state. Serial columns are omitted from INSERTs -- the
     database generates them, identically on both fresh sides.
+
+    Generates ~per_table writes per table, combinatorially across columns,
+    values, and predicate forms. Relational writes use the schema's declared
+    relationships.
     """
     out: list[Candidate] = []
     S = schema
+
+    # Declared relationships: (parent, child, fk_col)
+    rel_map: dict[str, list[tuple[str, str]]] = {}  # child -> [(parent, fk)]
+    for parent_name, child_name, fk_name in S.relationships:
+        rel_map.setdefault(child_name, []).append((parent_name, fk_name))
 
     for t in S.tables:
         if not t.rows:
@@ -428,60 +449,207 @@ def write_template_candidates(schema: Schema, rng: random.Random) -> list[Candid
         numeric = [c for c in insertable
                    if any(k in c.type for k in ("int", "numeric"))]
         textual = [c for c in insertable if c.type.startswith("text")]
-
-        # --- insert a single row -----------------------------------------
-        # Candidate lists columns in schema order; reference reorders them.
-        # Same row, different text.
-        row = rng.choice(t.rows)
-        vals = [_lit(v) for v in row]
-        cols_fwd = ", ".join(c.quoted for c in insertable)
-        vals_fwd = ", ".join(vals)
-        order = list(range(len(insertable)))
-        rng.shuffle(order)
-        cols_rev = ", ".join(insertable[i].quoted for i in order)
-        vals_rev = ", ".join(vals[i] for i in order)
-        desc = ", ".join(f"{c.name} {_lit(v)}" for c, v in list(zip(insertable, row))[:2])
-        # crude singular: "customers" -> "customer", "members" -> "member"
+        dated = [c for c in insertable if "date" in c.type]
         singular = t.name[:-1] if t.name.endswith("s") else t.name
-        out.append(Candidate(
-            S.key,
-            f"Add a new {singular} with {desc}.",
-            f"INSERT INTO {tq} ({cols_fwd}) VALUES ({vals_fwd})",
-            f"INSERT INTO {tq} ({cols_rev}) VALUES ({vals_rev})",
-            "insert_single", difficulty=2, is_write=True))
+        n0 = len(out)
 
-        # --- update with a predicate --------------------------------------
-        # Candidate uses *= form; reference uses the expanded form.
-        for c in numeric[:1]:
-            for tc in textual[:1]:
-                if not colvals.get(tc.name):
+        def cap() -> bool:
+            return len(out) - n0 >= per_table
+
+        # --- inserts: variants of each seed row --------------------------
+        for row in t.rows:
+            if cap():
+                break
+            variants = [row]
+            for _ in range(11):
+                lst = list(row)
+                i = rng.randrange(len(lst))
+                v = lst[i]
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    lst[i] = v + rng.choice([1, -1, 10, -10, 100, 2, 5])
+                elif isinstance(v, str):
+                    lst[i] = v + rng.choice([" Jr", " Sr", " II", " (new)",
+                                             " X", " Pro", " Lite"])
+                variants.append(tuple(lst))
+            for vrow in variants:
+                if cap():
+                    break
+                vals = [_lit(v) for v in vrow]
+                cols_fwd = ", ".join(c.quoted for c in insertable)
+                vals_fwd = ", ".join(vals)
+                order = list(range(len(insertable)))
+                rng.shuffle(order)
+                cols_rev = ", ".join(insertable[i].quoted for i in order)
+                vals_rev = ", ".join(vals[i] for i in order)
+                desc = ", ".join(f"{c.name} {_lit(v)}"
+                                 for c, v in list(zip(insertable, vrow))[:2])
+                out.append(Candidate(
+                    S.key, f"Add a new {singular} with {desc}.",
+                    f"INSERT INTO {tq} ({cols_fwd}) VALUES ({vals_fwd})",
+                    f"INSERT INTO {tq} ({cols_rev}) VALUES ({vals_rev})",
+                    "insert_single", difficulty=2, is_write=True))
+
+        # --- updates: set-col x predicate --------------------------------
+        for c in numeric:
+            if cap():
+                break
+            if not colvals.get(c.name):
+                continue
+            for tc in textual:
+                if cap():
+                    break
+                for pick in colvals.get(tc.name, []):
+                    if cap():
+                        break
+                    new_v = rng.choice(colvals[c.name])
+                    out.append(Candidate(
+                        S.key,
+                        f"Set {c.name} to {_lit(new_v)} for {t.name} "
+                        f"where {tc.name} is {_lit(pick)}.",
+                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                        f"WHERE {tc.quoted} = {_lit(pick)}",
+                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                        f"WHERE {tc.quoted} IN ({_lit(pick)})",
+                        "update_where", difficulty=2, is_write=True))
+        for c in textual:
+            if cap():
+                break
+            if not colvals.get(c.name):
+                continue
+            for tc in textual:
+                if tc.name == c.name or cap():
                     continue
-                pick = rng.choice(colvals[tc.name])
-                new_v = rng.choice(colvals[c.name])
+                for pick in colvals.get(tc.name, [])[:2]:
+                    if cap():
+                        break
+                    new_v = rng.choice(colvals[c.name])
+                    out.append(Candidate(
+                        S.key,
+                        f"Set {c.name} to {_lit(new_v)} for {t.name} "
+                        f"where {tc.name} is {_lit(pick)}.",
+                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                        f"WHERE {tc.quoted} = {_lit(pick)}",
+                        f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
+                        f"WHERE {tc.quoted} IN ({_lit(pick)})",
+                        "update_where", difficulty=3, is_write=True))
+
+        # --- deletes -----------------------------------------------------
+        for tc in textual + dated:
+            if cap():
+                break
+            for pick in colvals.get(tc.name, []):
+                if cap():
+                    break
+                out.append(Candidate(
+                    S.key, f"Remove {t.name} where {tc.name} is {_lit(pick)}.",
+                    f"DELETE FROM {tq} WHERE {tc.quoted} = {_lit(pick)}",
+                    f"DELETE FROM {tq} WHERE {tc.quoted} IN ({_lit(pick)})",
+                    "delete_where", difficulty=2, is_write=True))
+        if len(textual) >= 2 and not cap():
+            tc1, tc2 = textual[0], textual[1]
+            for p1 in colvals.get(tc1.name, [])[:2]:
+                if cap():
+                    break
+                for p2 in colvals.get(tc2.name, [])[:2]:
+                    if cap():
+                        break
+                    out.append(Candidate(
+                        S.key,
+                        f"Remove {t.name} where {tc1.name} is {_lit(p1)} "
+                        f"and {tc2.name} is {_lit(p2)}.",
+                        f"DELETE FROM {tq} WHERE {tc1.quoted} = {_lit(p1)} "
+                        f"AND {tc2.quoted} = {_lit(p2)}",
+                        f"DELETE FROM {tq} WHERE {tc2.quoted} = {_lit(p2)} "
+                        f"AND {tc1.quoted} = {_lit(p1)}",
+                        "delete_where", difficulty=3, is_write=True))
+
+        # --- multi-column updates ----------------------------------------
+        if len(numeric) >= 2 and not cap():
+            c1, c2 = numeric[0], numeric[1]
+            if colvals.get(c1.name) and colvals.get(c2.name):
+                for tc in textual[:1]:
+                    if cap():
+                        break
+                    for pick in colvals.get(tc.name, [])[:2]:
+                        if cap():
+                            break
+                        v1 = rng.choice(colvals[c1.name])
+                        v2 = rng.choice(colvals[c2.name])
+                        out.append(Candidate(
+                            S.key,
+                            f"Set {c1.name} to {_lit(v1)} and {c2.name} to "
+                            f"{_lit(v2)} for {t.name} where {tc.name} "
+                            f"is {_lit(pick)}.",
+                            f"UPDATE {tq} SET {c1.quoted} = {_lit(v1)}, "
+                            f"{c2.quoted} = {_lit(v2)} "
+                            f"WHERE {tc.quoted} = {_lit(pick)}",
+                            f"UPDATE {tq} SET {c2.quoted} = {_lit(v2)}, "
+                            f"{c1.quoted} = {_lit(v1)} "
+                            f"WHERE {tc.quoted} IN ({_lit(pick)})",
+                            "update_where", difficulty=3, is_write=True))
+
+        # --- relational writes via declared relationships -----------------
+        for parent_name, fk_name in rel_map.get(t.name, []):
+            if cap():
+                break
+            parent = next(p for p in S.tables if p.name == parent_name)
+            pq = parent.quoted
+            fk_q = f'"{fk_name}"' if " " in fk_name else fk_name
+            n_parents = len(parent.rows)
+            if not n_parents:
+                continue
+            pid = rng.randint(1, n_parents)
+            # insert with FK
+            if not cap() and t.rows:
+                row = rng.choice(t.rows)
+                vals = [_lit(v) for v in row]
+                try:
+                    fi = [c.name for c in insertable].index(fk_name)
+                    vals[fi] = str(pid)
+                except ValueError:
+                    pass
+                cols_fwd = ", ".join(c.quoted for c in insertable)
+                order = list(range(len(insertable)))
+                rng.shuffle(order)
+                cols_rev = ", ".join(insertable[i].quoted for i in order)
+                vals_rev = ", ".join(vals[i] for i in order)
+                out.append(Candidate(
+                    S.key,
+                    f"Add a new {singular} linked to {parent_name} {pid}.",
+                    f"INSERT INTO {tq} ({cols_fwd}) VALUES ({', '.join(vals)})",
+                    f"INSERT INTO {tq} ({cols_rev}) VALUES ({vals_rev})",
+                    "insert_fk", difficulty=3, is_write=True))
+            # update via parent subquery
+            if numeric and not cap():
+                c = rng.choice(numeric)
+                new_v = rng.choice(colvals[c.name]) if colvals.get(c.name) else 0
                 out.append(Candidate(
                     S.key,
                     f"Set {c.name} to {_lit(new_v)} for {t.name} "
-                    f"where {tc.name} is {_lit(pick)}.",
+                    f"linked to {parent_name} {pid}.",
                     f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
-                    f"WHERE {tc.quoted} = {_lit(pick)}",
+                    f"WHERE {fk_q} IN (SELECT id FROM {pq} WHERE id = {pid})",
                     f"UPDATE {tq} SET {c.quoted} = {_lit(new_v)} "
-                    f"WHERE {tc.quoted} IN ({_lit(pick)})",
-                    "update_where", difficulty=2, is_write=True))
-
-        # --- delete with a predicate ---------------------------------------
-        for tc in textual[:1]:
-            if not colvals.get(tc.name):
-                continue
-            pick = rng.choice(colvals[tc.name])
-            out.append(Candidate(
-                S.key,
-                f"Remove {t.name} where {tc.name} is {_lit(pick)}.",
-                f"DELETE FROM {tq} WHERE {tc.quoted} = {_lit(pick)}",
-                f"DELETE FROM {tq} WHERE {tc.quoted} IN ({_lit(pick)})",
-                "delete_where", difficulty=2, is_write=True))
+                    f"WHERE {fk_q} = {pid}",
+                    "update_fk", difficulty=4, is_write=True))
+            # delete via parent subquery
+            if not cap():
+                out.append(Candidate(
+                    S.key,
+                    f"Remove {t.name} linked to {parent_name} {pid}.",
+                    f"DELETE FROM {tq} WHERE {fk_q} IN "
+                    f"(SELECT id FROM {pq} WHERE id = {pid})",
+                    f"DELETE FROM {tq} WHERE {fk_q} = {pid}",
+                    "delete_fk", difficulty=4, is_write=True))
 
     rng.shuffle(out)
-    return out
+    seen = set()
+    uniq = []
+    for c in out:
+        if c.sql not in seen:
+            seen.add(c.sql)
+            uniq.append(c)
+    return uniq
 
 
 def teacher_candidates(schema: Schema, rng: random.Random, generate,
