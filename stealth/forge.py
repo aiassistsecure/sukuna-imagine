@@ -31,6 +31,8 @@ import json
 import os
 import random
 import time
+import urllib.request
+from urllib.parse import quote
 from dataclasses import dataclass, asdict
 from multiprocessing import Pool, cpu_count
 
@@ -50,6 +52,9 @@ def materialise(schema: Schema, admin_dsn: str, dbname: str | None = None) -> st
     con.autocommit = True
     try:
         with con.cursor() as cur:
+            cur.execute("SELECT version()")
+            if "nedb" in str(cur.fetchone()[0]).lower():
+                return _materialise_nedb(schema, dbname)
             cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
             cur.execute(f'CREATE DATABASE "{dbname}"')
     finally:
@@ -66,6 +71,66 @@ def materialise(schema: Schema, admin_dsn: str, dbname: str | None = None) -> st
                 cur.executemany(tmpl, rows)
     finally:
         con.close()
+    return dbname
+
+
+def schema_catalog(schema: Schema) -> dict:
+    """Give each forge/eval gate its own declared schema, including empty tables."""
+    def kind(typ):
+        typ = typ.lower()
+        if "serial" in typ or "int" in typ:
+            return "int"
+        if typ.startswith(("numeric", "decimal", "real", "double")):
+            return "numeric"
+        if typ.startswith("timestamp"):
+            return "timestamp"
+        if typ.startswith("date"):
+            return "date"
+        if typ.startswith("bool"):
+            return "bool"
+        return "text"
+    return {t.name: {c.name: kind(c.type) for c in t.columns} for t in schema.tables}
+
+
+def _materialise_nedb(schema: Schema, dbname: str) -> str:
+    """Rebuild only forge-owned databases; seed typed documents without SQL DDL."""
+    if not dbname.startswith("stealth_"):
+        raise ValueError("NEDB materialisation may only replace stealth_* databases")
+    base = os.environ.get("STEALTH_NEDB_URL", "http://127.0.0.1:7070").rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("STEALTH_NEDB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    def request(method, path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read() or b"null")
+    path = "/v1/databases/" + quote(dbname, safe="")
+    # Validate row widths before replacing an existing fixture database.
+    schema.seed()
+    request("DELETE", path)
+    request("POST", "/v1/databases", {"name": dbname})
+    for table in schema.tables:
+        columns = [c for c in table.columns if "serial" not in c.type.lower()]
+        for index, values in enumerate(table.rows, 1):
+            doc = dict(zip([c.name for c in columns], values))
+            for column in table.columns:
+                if "serial" in column.type.lower():
+                    doc[column.name] = index
+            key = doc.get(table.primary_key) if table.primary_key else None
+            request("POST", path + "/put", {
+                "coll": table.name, "id": str(index if key is None else key), "doc": doc})
+        if not table.rows:
+            # A tombstone registers the collection without leaving a fake row.
+            key = "__stealth_empty_fixture__"
+            request("POST", path + "/put", {
+                "coll": table.name, "id": key,
+                "doc": {c.name: None for c in table.columns}})
+            request("DELETE", path + "/rows/" + quote(table.name, safe="") + "/" + key)
+    result = request("GET", path + "/verify")
+    if result.get("ok") is not True:
+        raise RuntimeError(f"NEDB fixture verification failed: {result}")
     return dbname
 
 
@@ -388,7 +453,7 @@ def _gate_for(schema_key: str) -> Gate:
     if schema_key not in gates:
         dsn = _swap_db(_WORKER["admin_dsn"], f"stealth_{schema_key}")
         g = Gate(dsn, statement_timeout_ms=_WORKER["timeout_ms"],
-                 max_rows=_WORKER["max_rows"])
+                 max_rows=_WORKER["max_rows"], schema=schema_catalog(CATALOG[schema_key]))
         g.connect()
         gates[schema_key] = g
     return gates[schema_key]
