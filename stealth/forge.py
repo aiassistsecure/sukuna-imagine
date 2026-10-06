@@ -39,6 +39,7 @@ import time
 import urllib.request
 from urllib.parse import quote
 from dataclasses import dataclass, asdict
+from datetime import date
 from multiprocessing import Pool, cpu_count
 
 import psycopg2
@@ -181,14 +182,29 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
                              f"SELECT count(*) FROM {tq}",
                              f"SELECT count(1) FROM {tq}", "count_all"))
 
-        # --- count with an equality filter ---------------------------------
-        for c in textual[:2]:
-            out.append(Candidate(
-                S.key,
+        # Contrast row counts, populated cells, and unique populated values.
+        for c in cols:
+            if c.name == t.primary_key:
+                continue
+            for question in (
                 f"How many {t.name} have {c.name} set?",
-                f"SELECT count({c.quoted}) FROM {tq}",
-                f"SELECT count(*) FROM {tq} WHERE {c.quoted} IS NOT NULL",
-                "count_non_null", difficulty=2))
+                f"Count {t.name} rows with a non-null {c.name}.",
+            ):
+                out.append(Candidate(
+                    S.key, question, f"SELECT count({c.quoted}) FROM {tq}",
+                    f"SELECT count(*) FROM {tq} WHERE {c.quoted} IS NOT NULL",
+                    "count_non_null", difficulty=2))
+            out.append(Candidate(
+                S.key, f"How many {t.name} have no {c.name} set?",
+                f"SELECT count(*) FROM {tq} WHERE {c.quoted} IS NULL",
+                f"SELECT count(*) - count({c.quoted}) FROM {tq}",
+                "count_null", difficulty=2))
+            out.append(Candidate(
+                S.key, f"How many different non-null {c.name} values occur in {t.name}?",
+                f"SELECT count(DISTINCT {c.quoted}) FROM {tq}",
+                f"SELECT count(*) FROM (SELECT {c.quoted} FROM {tq} "
+                f"WHERE {c.quoted} IS NOT NULL GROUP BY {c.quoted}) q",
+                "count_distinct", difficulty=3))
 
         # --- select with a numeric predicate -------------------------------
         for c in numeric[:2]:
@@ -290,70 +306,78 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
                 f"WHERE {g.quoted} IS NOT NULL) q",
                 "count_distinct_text", difficulty=3))
 
-        # --- date/timestamp semantics ---------------------------------------
-        # Never add unrelated predicates to date questions. Multiple windows
-        # teach clean temporal filtering and protect against invented filters.
+        # Explicit date columns keep multi-date schemas unambiguous. Half-open
+        # ranges include midnight at the start and exclude the next period.
         for d in dated:
-            for year in (2025, 2026):
-                out.append(Candidate(
-                    S.key,
-                    f"Which {t.name} happened in {year}?",
-                    f"SELECT * FROM {tq} WHERE {d.quoted} >= '{year}-01-01' "
-                    f"AND {d.quoted} < '{year + 1}-01-01'",
-                    f"SELECT * FROM {tq} WHERE extract(year from {d.quoted}) = {year}",
-                    "date_range", difficulty=3))
-                out.append(Candidate(
-                    S.key,
-                    f"How many {t.name} happened in {year}?",
-                    f"SELECT count(*) FROM {tq} WHERE {d.quoted} >= '{year}-01-01' "
-                    f"AND {d.quoted} < '{year + 1}-01-01'",
-                    f"SELECT count(*) FROM {tq} "
-                    f"WHERE extract(year from {d.quoted}) = {year}",
-                    "date_count", difficulty=3))
-            out.append(Candidate(
-                S.key,
-                f"Which {t.name} happened in March 2026?",
-                f"SELECT * FROM {tq} WHERE {d.quoted} >= '2026-03-01' "
-                f"AND {d.quoted} < '2026-04-01'",
-                f"SELECT * FROM {tq} WHERE extract(year from {d.quoted}) = 2026 "
-                f"AND extract(month from {d.quoted}) = 3",
-                "month_range", difficulty=3))
+            for year in (2024, 2025, 2026, 2027):
+                windows = [(f"{year}", date(year, 1, 1), date(year + 1, 1, 1),
+                            f"extract(year from {d.quoted}) = {year}")]
+                for month in range(1, 13):
+                    start = date(year, month, 1)
+                    end = date(year + (month == 12), month % 12 + 1, 1)
+                    windows.append((start.strftime("%B %Y"), start, end,
+                                    f"extract(year from {d.quoted}) = {year} AND "
+                                    f"extract(month from {d.quoted}) = {month}"))
+                for label, start, end, ref_pred in windows:
+                    predicate = f"{d.quoted} >= '{start}' AND {d.quoted} < '{end}'"
+                    for projection, question, kind in (
+                        ("*", f"Show all {t.name} with {d.name} in {label}.", "date_range"),
+                        ("count(*)", f"How many {t.name} have {d.name} in {label}?", "date_count"),
+                    ):
+                        out.append(Candidate(
+                            S.key, question,
+                            f"SELECT {projection} FROM {tq} WHERE {predicate}",
+                            f"SELECT {projection} FROM {tq} WHERE {ref_pred}",
+                            kind, difficulty=3))
+                    # Pair an unfiltered window with an explicitly requested
+                    # business filter; never infer one for the broad question.
+                    for c in textual[:1]:
+                        for value in _seed_col_values(t).get(c.name, [])[:2]:
+                            lit = _lit(value)
+                            out.append(Candidate(
+                                S.key, f"Show {t.name} with {d.name} in {label} "
+                                f"where {c.name} is {lit}.",
+                                f"SELECT * FROM {tq} WHERE {predicate} AND {c.quoted} = {lit}",
+                                f"SELECT * FROM {tq} WHERE {ref_pred} AND {c.quoted} = {lit}",
+                                "date_filtered", difficulty=3))
 
-    # --- joins across the first two tables that plausibly relate -----------
-    if len(S.tables) >= 2:
-        left, right = S.tables[0], S.tables[1]
-        fk = None
-        for c in right.columns:
-            n = c.name.lower().replace('"', "")
-            if n.endswith("_id") or n.endswith("id") and n != "id":
-                fk = c
-                break
-        if fk is not None:
+    # Relationships are declared, never guessed from an arbitrary *_id field.
+    for parent_name, child_name, fk_name in S.relationships:
+        left = next(t for t in S.tables if t.name == parent_name)
+        right = next(t for t in S.tables if t.name == child_name)
+        pk = next(c for c in left.columns if c.name == left.primary_key)
+        fk = next(c for c in right.columns if c.name == fk_name)
+        scalar = (f"(SELECT count(*) FROM {right.quoted} r "
+                  f"WHERE r.{fk.quoted} = l.{pk.quoted})")
+        for question in (
+            f"Show each {left.name} ID alongside its related {right.name} count, including zero counts.",
+            f"How many related {right.name} rows does each {left.name} ID have? Include IDs with none.",
+        ):
             out.append(Candidate(
-                S.key,
-                f"Show each {left.name} row alongside its related {right.name} count.",
-                f"SELECT l.id, count(r.*) FROM {left.quoted} l "
-                f"LEFT JOIN {right.quoted} r ON r.{fk.quoted} = l.id GROUP BY l.id",
-                f"SELECT l.id, (SELECT count(*) FROM {right.quoted} r2 "
-                f"WHERE r2.{fk.quoted} = l.id) FROM {left.quoted} l",
-                "join_count", difficulty=4))
-            out.append(Candidate(
-                S.key,
-                f"How many related {right.name} rows does each {left.name} have?",
-                f"SELECT l.id, count(r.{fk.quoted}) FROM {left.quoted} l "
-                f"LEFT JOIN {right.quoted} r ON r.{fk.quoted} = l.id GROUP BY l.id",
-                f"SELECT l.id, (SELECT count(*) FROM {right.quoted} r2 "
-                f"WHERE r2.{fk.quoted} = l.id) FROM {left.quoted} l",
-                "join_count_projection", difficulty=4))
-            out.append(Candidate(
-                S.key,
-                f"Which {left.name} rows have at least one related {right.name}?",
-                f"SELECT l.* FROM {left.quoted} l WHERE EXISTS "
-                f"(SELECT 1 FROM {right.quoted} r WHERE r.{fk.quoted} = l.id)",
-                f"SELECT l.* FROM {left.quoted} l WHERE l.id IN "
-                f"(SELECT r.{fk.quoted} FROM {right.quoted} r "
-                f"WHERE r.{fk.quoted} IS NOT NULL)",
-                "join_exists", difficulty=4))
+                S.key, question, f"SELECT l.{pk.quoted}, {scalar} FROM {left.quoted} l",
+                f"SELECT l.{pk.quoted}, count(r.{fk.quoted}) FROM {left.quoted} l "
+                f"LEFT JOIN {right.quoted} r ON r.{fk.quoted} = l.{pk.quoted} "
+                f"GROUP BY l.{pk.quoted}", "join_count", difficulty=4))
+        columns = ", ".join(f"l.{c.quoted}" for c in left.columns)
+        out.append(Candidate(
+            S.key, f"Show each {left.name} row alongside its related {right.name} count, including zero counts.",
+            f"SELECT {columns}, {scalar} FROM {left.quoted} l",
+            f"SELECT {columns}, {scalar} FROM {left.quoted} l",
+            "join_count_full_row", difficulty=4))
+        out.append(Candidate(
+            S.key, f"Which {left.name} rows have at least one related {right.name}?",
+            f"SELECT l.* FROM {left.quoted} l WHERE EXISTS "
+            f"(SELECT 1 FROM {right.quoted} r WHERE r.{fk.quoted} = l.{pk.quoted})",
+            f"SELECT l.* FROM {left.quoted} l WHERE l.{pk.quoted} IN "
+            f"(SELECT r.{fk.quoted} FROM {right.quoted} r WHERE r.{fk.quoted} IS NOT NULL)",
+            "join_exists", difficulty=4))
+        out.append(Candidate(
+            S.key, f"Which {left.name} rows have no related {right.name}?",
+            f"SELECT l.* FROM {left.quoted} l WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {right.quoted} r WHERE r.{fk.quoted} = l.{pk.quoted})",
+            f"SELECT l.* FROM {left.quoted} l WHERE l.{pk.quoted} NOT IN "
+            f"(SELECT r.{fk.quoted} FROM {right.quoted} r WHERE r.{fk.quoted} IS NOT NULL)",
+            "join_absent", difficulty=4))
 
     rng.shuffle(out)
     return out
