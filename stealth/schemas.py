@@ -81,6 +81,8 @@ class Schema:
     notes: str = ""
     tags: list[str] = field(default_factory=list)
 
+    relationships: tuple[tuple[str, str, str], ...] = ()
+
     # ---- DDL ------------------------------------------------------------
     def ddl(self) -> list[str]:
         out = []
@@ -148,6 +150,7 @@ def _C(n, t, note=""):
 # ---------------------------------------------------------------------------
 
 SHOP = Schema(
+    relationships=(("customers", "orders", "customer_id"),),
     key="shop", domain="e-commerce",
     tags=["classic", "snake_case"],
     notes="The canonical example. Deliberately the most conventional schema "
@@ -176,6 +179,7 @@ SHOP = Schema(
 )
 
 CLINIC = Schema(
+    relationships=(("patients", "appointments", "patient_id"), ("practitioners", "appointments", "practitioner_id")),
     key="clinic", domain="healthcare scheduling",
     tags=["same-concept-different-name", "nullable"],
     notes="`appointments` is the orders-analogue under a different name, and "
@@ -203,6 +207,7 @@ CLINIC = Schema(
 )
 
 LIBRARY = Schema(
+    relationships=(("books", "loans", "book_id"), ("members", "loans", "member_id"), ("books", "reservations", "book_id"), ("members", "reservations", "member_id")),
     key="library", domain="lending",
     tags=["reserved-words", "quoted-identifiers", "empty-table"],
     notes='Uses "order" and "Mixed Case" identifiers that MUST be quoted, and '
@@ -234,6 +239,7 @@ LIBRARY = Schema(
 )
 
 FLEET = Schema(
+    relationships=(("vehicles", "routes", "vehicleId"),),
     key="fleet", domain="logistics",
     tags=["camelCase", "colliding-names"],
     notes="camelCase identifiers throughout (so they must be quoted), and a "
@@ -256,6 +262,7 @@ FLEET = Schema(
 )
 
 TELEMETRY = Schema(
+    relationships=(("hosts", "samples", "host_id"),),
     key="telemetry", domain="observability",
     tags=["timestamps", "wide-numeric", "nullable"],
     notes="Timestamps rather than dates, and a nullable metric so COUNT(col) "
@@ -277,8 +284,32 @@ TELEMETRY = Schema(
     ],
 )
 
+# Training-only contrast fixture: counts are 8 rows / 7 populated / 2 distinct;
+# date boundaries cross December, leap February, March, and the next year.
+AUDIT = Schema(
+    key="audit", domain="project activity",
+    relationships=(("projects", "activities", "project_id"),),
+    tags=["date-boundaries", "count-semantics", "zero-children"],
+    tables=[
+        Table("projects", [
+            _C("id", "serial PRIMARY KEY"), _C("name", "text NOT NULL"),
+        ], [("Atlas",), ("Birch",), ("Cedar",)]),
+        Table("activities", [
+            _C("id", "serial PRIMARY KEY"), _C("project_id", "int"),
+            _C("category", "text"), _C("occurred_at", "timestamp"),
+        ], [(1, "review", "2024-02-29 12:00:00"),
+            (1, "review", "2024-12-31 23:59:59"),
+            (2, "deploy", "2025-01-01 00:00:00"),
+            (2, "review", "2025-12-31 23:59:59"),
+            (1, "deploy", "2026-01-01 00:00:00"),
+            (2, "review", "2026-03-01 00:00:00"),
+            (1, "review", "2026-04-01 00:00:00"),
+            (None, None, None)]),
+    ],
+)
+
 CATALOG: dict[str, Schema] = {
-    s.key: s for s in (SHOP, CLINIC, LIBRARY, FLEET, TELEMETRY)
+    s.key: s for s in (SHOP, CLINIC, LIBRARY, FLEET, AUDIT, TELEMETRY)
 }
 
 # Held out from training entirely. Generalisation is measured here: if the
