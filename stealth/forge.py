@@ -596,7 +596,15 @@ def _process(c: Candidate) -> dict:
     g = _gate_for(c.schema_key)
     if c.is_write:
         schema = CATALOG[c.schema_key]
-        tables = [t.quoted for t in schema.tables]
+        # Keep only business columns for the state digest: serial/id
+        # columns are auto-generated and not deterministic across fresh
+        # databases, so including them would fail identical writes.
+        tables = []
+        for t in schema.tables:
+            keep = [col.quoted for col in t.columns
+                    if "serial" not in col.type.lower()
+                    and col.name not in ("id", "_id")]
+            tables.append((t.quoted, keep))
         catalog = _catalog_dict(schema)
         r = g.run_write(c.sql, c.reference_sql,
                         fresh_dsn=lambda tag: _fresh_dsn(c.schema_key, tag),
