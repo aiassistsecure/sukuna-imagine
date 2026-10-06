@@ -785,6 +785,27 @@ def _fresh_dsn(schema_key: str, tag: str) -> str:
 
 
 def _process(c: Candidate) -> dict:
+    # Workers must never raise: an exception holding a DB connection
+    # (BufferedReader) cannot be pickled back to the parent, which masks
+    # the real error as MaybeEncodingError. Convert to a reject record.
+    try:
+        return _process_inner(c)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "schema_key": c.schema_key,
+            "question": c.question,
+            "sql": c.sql,
+            "kind": c.kind,
+            "difficulty": c.difficulty,
+            "admitted": False,
+            "level": 0,
+            "reason": f"WORKER: {type(e).__name__}: {e}",
+            "rowcount": None,
+            "result_digest": None,
+        }
+
+
+def _process_inner(c: Candidate) -> dict:
     g = _gate_for(c.schema_key)
     if c.is_write:
         schema = CATALOG[c.schema_key]
