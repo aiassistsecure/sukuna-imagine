@@ -13,9 +13,12 @@ FIVE LEVELS, each strictly stronger than the last:
                "looks like SQL" heuristic. The actual grammar.
   L1 SAFETY    read-only and bounded: exactly one statement, SELECT/WITH only,
                no DDL/DML, no system catalogs, no pg_sleep, no COPY/file access.
-  L2 BIND      EXPLAIN it against the live schema. This is where hallucinated
-               tables, hallucinated columns, ambiguous references and type
-               errors die -- BEFORE any row is read.
+  L2 BIND      Two parts. First, the gate's OWN schema catalog: NEDB is schemaless
+               by design, so EXPLAIN cannot catch hallucinated tables, hallucinated
+               columns, ambiguous references or type errors -- it plans them all.
+               The gate walks the parse tree against its catalog and kills them
+               here, in PostgreSQL's own vocabulary. Second, EXPLAIN against the
+               live engine for whatever the catalog cannot see.
   L3 EXECUTE   run it under a statement timeout and a row cap.
   L4 AGREE     compare the result set against a reference query's result set.
 
@@ -39,6 +42,8 @@ import psycopg2
 import psycopg2.extras
 from pglast import parse_sql
 from pglast.parser import ParseError
+
+from stealth.schema import SHOP_SCHEMA, check_schema
 
 
 class Level(IntEnum):
@@ -182,10 +187,12 @@ class Gate:
     """
 
     def __init__(self, dsn: str, statement_timeout_ms: int = 5000,
-                 max_rows: int = 2000):
+                 max_rows: int = 2000, schema: dict | None = None):
         self.dsn = dsn
         self.statement_timeout_ms = statement_timeout_ms
         self.max_rows = max_rows
+        # The gate's own catalog. NEDB stays schemaless; the strictness lives here.
+        self.schema = SHOP_SCHEMA if schema is None else schema
         self._conn = None
 
     def connect(self):
@@ -203,12 +210,16 @@ class Gate:
 
     # -- L2 -----------------------------------------------------------------
     def check_bind(self, sql: str) -> tuple[bool, str]:
-        """EXPLAIN without ANALYZE: plans the query, touches no rows.
+        """Schema-catalog validation first, EXPLAIN second.
 
-        This is where a hallucinated column dies. It is far cheaper than
-        executing, and it produces PostgreSQL's own error message, which is
-        exactly the feedback a repair loop wants to hand back to the model.
+        The catalog check is deterministic and needs no round trip; it is also
+        the only thing that can catch hallucinations, because NEDB is
+        schemaless and EXPLAIN will plan anything. EXPLAIN stays as the
+        backstop for whatever the catalog cannot see.
         """
+        ok, reason = check_schema(sql, self.schema)
+        if not ok:
+            return False, reason
         conn = self.connect()
         try:
             with conn.cursor() as cur:
