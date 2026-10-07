@@ -394,6 +394,82 @@ def template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
     return out
 
 
+def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
+    """Complex analytical query templates for v10.
+
+    Targets v9's failure mode on multi-clause analytical queries:
+    LEFT JOIN + GROUP BY + COALESCE + complex ORDER BY, subqueries,
+    window functions, HAVING, multi-table JOINs.
+    """
+    out: list[Candidate] = []
+    S = schema
+
+    # Find parent-child relationships via foreign keys
+    for t in S.tables:
+        tq = t.quoted
+        cols = t.columns
+        numeric = [c for c in cols if any(k in c.type for k in ("int", "numeric", "serial", "real", "double"))
+                   and c.name != "id"]
+        # Find tables that reference this one (children)
+        children = []
+        for ot in S.tables:
+            if ot == t:
+                continue
+            for c in ot.columns:
+                if c.name == f"{t.name}_id" or (c.name.endswith("_id") and t.name in c.name):
+                    children.append((ot, c))
+                    break
+
+        if not children or not numeric:
+            continue
+
+        child, fk = children[0]
+        cq = child.quoted
+        num_col = numeric[0]
+
+        # --- Category 1: Aggregation with LEFT JOIN (the v9 failure mode) ---
+        out.append(Candidate(
+            S.key,
+            f"List every {t.name} ID, name, and total {num_col.name} from {child.name}. Include {t.name}s with no {child.name}s (show 0). Sort by total descending, then ID ascending.",
+            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} "
+            f"GROUP BY t.id, t.name ORDER BY total DESC, t.id ASC",
+            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"FROM {tq} AS t LEFT JOIN {cq} AS c ON c.{fk.quoted} = t.id "
+            f"GROUP BY t.id, t.name ORDER BY 3 DESC, 1 ASC",
+            "analytical_left_join_agg", difficulty=5))
+
+        # --- Category 2: GROUP BY with HAVING ---
+        out.append(Candidate(
+            S.key,
+            f"Find {t.name}s with more than 2 related {child.name}s. Show ID, name, and count. Sort by count descending.",
+            f"SELECT t.id, t.name, COUNT(c.id) AS cnt FROM {tq} t "
+            f"JOIN {cq} c ON t.id = c.{fk.quoted} "
+            f"GROUP BY t.id, t.name HAVING COUNT(c.id) > 2 ORDER BY cnt DESC",
+            f"SELECT t.id, t.name, COUNT(*) AS cnt FROM {tq} t, {cq} c "
+            f"WHERE t.id = c.{fk.quoted} GROUP BY t.id, t.name "
+            f"HAVING COUNT(*) > 2 ORDER BY 3 DESC",
+            "analytical_having", difficulty=5))
+
+        # --- Category 3: Subquery comparison ---
+        if len(numeric) >= 1:
+            out.append(Candidate(
+                S.key,
+                f"Find {t.name}s whose total {num_col.name} exceeds the average.",
+                f"SELECT id, name, total FROM (SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total "
+                f"FROM {tq} t JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name) sub "
+                f"WHERE total > (SELECT AVG(total) FROM (SELECT SUM({num_col.quoted}) AS total "
+                f"FROM {cq} GROUP BY {fk.quoted}) avg_sub) ORDER BY total DESC",
+                f"SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total FROM {tq} t "
+                f"JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name "
+                f"HAVING SUM(c.{num_col.quoted}) > (SELECT AVG(s) FROM "
+                f"(SELECT SUM({num_col.quoted}) AS s FROM {cq} GROUP BY {fk.quoted}) x)",
+                "analytical_subquery", difficulty=6))
+
+    rng.shuffle(out)
+    return out
+
+
 def _lit(v) -> str:
     """Render a Python value as a SQL literal."""
     if v is None:
@@ -927,6 +1003,8 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
     for k in keys:
         templ = template_candidates(CATALOG[k], rng)
         cands.extend(templ)
+        analyt = analytical_template_candidates(CATALOG[k], rng)
+        cands.extend(analyt)
         writes = write_template_candidates(CATALOG[k], rng)
         cands.extend(writes)
         teacher_n = 0
