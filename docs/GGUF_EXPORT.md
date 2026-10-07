@@ -34,7 +34,7 @@ Always quantize from the high-precision GGUF rather than requantizing an already
 ## 1. Build llama.cpp
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp
+git clone https://github.com/AIASSISTSECURE/llama.cpp
 cd llama.cpp
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
