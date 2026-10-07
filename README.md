@@ -106,7 +106,7 @@ correcting it and start training it.
 
 ## 📦 The output envelope
 
-The model wraps SQL in [**sentinel blocks**](https://github.com/Eth-Interchained/sentinel-blocks):
+The model wraps SQL in [**sentinel blocks**](https://github.com/AIASSISTSECURE/sentinel-blocks):
 
 ```
 <<<SQL>>>
