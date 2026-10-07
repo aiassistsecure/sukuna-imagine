@@ -40,4 +40,4 @@ python scripts/merge_corpus.py \
 bash scripts/train_imagine.sh
 ```
 
-The teacher proposes candidate SQL, but only examples accepted by the PostgreSQL execution gate are admitted to the training corpus.
+The teacher proposes candidate SQL, but only examples accepted by the NEDB-ENGINE execution gate are admitted to the training corpus.
