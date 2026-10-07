@@ -470,6 +470,104 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
     return out
 
 
+def predicate_placement_candidates(schema: Schema, rng: random.Random) -> list[Candidate]:
+    """v11: WHERE-vs-ON predicate placement on outer joins.
+
+    Targets v10's live failure mode (2026-10-07): asked for "every X with
+    total Y from <status> Zs, include Xs with none (show 0)", v10 emitted
+    LEFT JOIN ... WHERE child.status = '<status>' -- the WHERE runs after
+    the join, silently converting it to an inner join and dropping the
+    zero-rows the question explicitly asked for. The predicate belongs in
+    the ON clause (or the aggregation must be conditional).
+    """
+    out: list[Candidate] = []
+    S = schema
+
+    for t in S.tables:
+        tq = t.quoted
+        cols = t.columns
+        # Parent display column: prefer `name`, else first text column.
+        name_col = next((c for c in cols if c.name == "name"), None)
+        if name_col is None:
+            name_col = next((c for c in cols if "text" in c.type), None)
+        if name_col is None:
+            continue
+        # Children via the schema's declared relationships (parent, child, fk).
+        # (Name-heuristic matching fails on plural table names, e.g.
+        # "customers" vs "customer_id", so trust the declaration.)
+        children = []
+        for parent_name, child_name, fk_name in S.relationships:
+            if parent_name != t.name:
+                continue
+            child = next((ot for ot in S.tables if ot.name == child_name), None)
+            if child is None:
+                continue
+            fk = next((c for c in child.columns if c.name == fk_name), None)
+            if fk is None:
+                continue
+            children.append((child, fk))
+        if not children:
+            continue
+        child, fk = children[0]
+        cq = child.quoted
+        numeric = [c for c in child.columns
+                   if any(k in c.type for k in ("int", "numeric", "serial", "real", "double"))
+                   and c.name not in ("id", fk.name)]
+        # Status-like column: text with pipe-separated allowed values in note.
+        status_col = next((c for c in child.columns
+                           if "text" in c.type and "|" in (c.note or "")), None)
+        if not numeric or status_col is None:
+            continue
+        num_cols = numeric[:2]
+        nq = name_col.quoted
+        sq = status_col.quoted
+        status_vals = [v.strip() for v in status_col.note.split("|")][:3]
+
+        for num in num_cols:
+            for status_val in status_vals:
+                # --- Category 1: predicate in ON clause (the v10 failure, fixed) ---
+                out.append(Candidate(
+                    S.key,
+                    f"List every {t.name} ID, {name_col.name}, and total {num.name} from {status_val} {child.name}. "
+                    f"Include {t.name}s with no {status_val} {child.name}s (show 0). "
+                    f"Sort by total descending, then ID ascending.",
+                    f"SELECT t.id, t.{nq}, COALESCE(SUM(c.{num.quoted}), 0) AS total "
+                    f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} AND c.{sq} = '{status_val}' "
+                    f"GROUP BY t.id, t.{nq} ORDER BY total DESC, t.id ASC",
+                    f"SELECT t.id, t.{nq}, SUM(COALESCE(c.{num.quoted}, 0)) AS total "
+                    f"FROM {tq} AS t LEFT JOIN {cq} AS c ON c.{fk.quoted} = t.id AND c.{sq} = '{status_val}' "
+                    f"GROUP BY t.id, t.{nq} ORDER BY 3 DESC, 1 ASC",
+                    "predicate_on_clause", difficulty=6))
+
+                # --- Category 2: conditional aggregation (equivalent, no ON filter) ---
+                out.append(Candidate(
+                    S.key,
+                    f"For each {t.name}, show ID, {name_col.name}, and the sum of {num.name} over {status_val} {child.name} only. "
+                    f"{t.name}s with none show 0. Sort by the sum descending.",
+                    f"SELECT t.id, t.{nq}, SUM(CASE WHEN c.{sq} = '{status_val}' THEN c.{num.quoted} ELSE 0 END) AS total "
+                    f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} "
+                    f"GROUP BY t.id, t.{nq} ORDER BY total DESC",
+                    f"SELECT t.id, t.{nq}, COALESCE(SUM(c.{num.quoted}), 0) AS total "
+                    f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} AND c.{sq} = '{status_val}' "
+                    f"GROUP BY t.id, t.{nq} ORDER BY 3 DESC",
+                    "predicate_conditional_agg", difficulty=6))
+
+                # --- Category 3: anti-join via NOT EXISTS (reference: LEFT JOIN + IS NULL) ---
+                out.append(Candidate(
+                    S.key,
+                    f"Find {t.name}s with no {status_val} {child.name}s. Show ID and {name_col.name}. Sort by ID ascending.",
+                    f"SELECT t.id, t.{nq} FROM {tq} t WHERE NOT EXISTS "
+                    f"(SELECT 1 FROM {cq} c WHERE c.{fk.quoted} = t.id AND c.{sq} = '{status_val}') "
+                    f"ORDER BY t.id ASC",
+                    f"SELECT t.id, t.{nq} FROM {tq} t LEFT JOIN {cq} c "
+                    f"ON t.id = c.{fk.quoted} AND c.{sq} = '{status_val}' "
+                    f"WHERE c.id IS NULL ORDER BY 1 ASC",
+                    "predicate_anti_join", difficulty=6))
+
+    rng.shuffle(out)
+    return out
+
+
 def _lit(v) -> str:
     """Render a Python value as a SQL literal."""
     if v is None:
@@ -1005,6 +1103,8 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
         cands.extend(templ)
         analyt = analytical_template_candidates(CATALOG[k], rng)
         cands.extend(analyt)
+        pred = predicate_placement_candidates(CATALOG[k], rng)
+        cands.extend(pred)
         writes = write_template_candidates(CATALOG[k], rng)
         cands.extend(writes)
         teacher_n = 0
@@ -1017,7 +1117,7 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
             teacher_n = len(taught)
             teacher_malformed += malformed
         suffix = f" + {teacher_n} teacher" if teacher_generate is not None else ""
-        print(f"  {k:12} {len(templ):5d} template + {len(writes):3d} write{suffix}")
+        print(f"  {k:12} {len(templ):5d} template + {len(analyt):3d} analytical + {len(pred):3d} predicate + {len(writes):3d} write{suffix}")
     print(f"* {len(cands)} candidates, {workers} workers")
 
     t0 = time.perf_counter()
