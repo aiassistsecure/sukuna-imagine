@@ -3,7 +3,7 @@
 Current training plan:
 
 - **Teacher:** `deepseek-ai/deepseek-coder-6.7b-instruct`
-- **Truth authority:** PostgreSQL L0-L4 execution gate
+- **Truth authority:** NEDB-ENGINE L0-L4 execution gate
 - **Student/base:** `deepseek-ai/deepseek-coder-1.3b-instruct`
 - **Final model:** Imagine
 
