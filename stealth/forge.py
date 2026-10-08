@@ -424,7 +424,6 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
             if fk is None:
                 continue
             children.append((child, fk))
-                    break
 
         if not children or not numeric:
             continue
