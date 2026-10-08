@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# sukuna-imagine one-shot setup for the H200 box.
+# sukuna-imagine one-shot setup for a GPU training box (H200, B200, ...).
 # Run:  chmod +x setup_h200.sh && ./setup_h200.sh
 # Everything the read/write project needs: repo, venv, deps, NEDB, gate proof.
+# The torch wheel is picked dynamically from the box's GPU + CUDA version.
 set -euo pipefail
 exec > >(tee "$HOME/setup_h200.log") 2>&1
 
 echo "=== 0 · GPU check ==="
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 python3 --version
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo unknown)"
+echo "detected GPU: $GPU_NAME"
 
 echo "=== 1 · repo ==="
 WORK="$HOME/sukuna-imagine"
@@ -24,8 +27,23 @@ echo "=== 2 · venv (always) ==="
 source venv/bin/activate
 pip install --upgrade pip
 
-echo "=== 3 · torch matched to this box (driver 570 -> CUDA 12.8) ==="
-pip install --index-url https://download.pytorch.org/whl/cu128 torch
+echo "=== 3 · torch matched to this box (auto-detected) ==="
+# Pick the torch CUDA wheel from the driver-reported CUDA version.
+# e.g. driver CUDA 12.8 -> cu128, 12.6 -> cu126, 12.4 -> cu124, 12.1 -> cu121.
+# Falls back to cu128 (covers Hopper H200 and Blackwell B200) when detection fails.
+CUDA_VER="$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:\s*\K[0-9]+\.[0-9]+' | head -1 || true)"
+case "${CUDA_VER:-}" in
+  12.8*) TORCH_CU="cu128" ;;
+  12.6*) TORCH_CU="cu126" ;;
+  12.4*) TORCH_CU="cu124" ;;
+  12.1*) TORCH_CU="cu121" ;;
+  11.8*) TORCH_CU="cu118" ;;
+  *)
+    echo "could not map CUDA version '${CUDA_VER:-unknown}' to a wheel - defaulting to cu128"
+    TORCH_CU="cu128" ;;
+esac
+echo "CUDA ${CUDA_VER:-unknown} -> torch wheel ${TORCH_CU}"
+pip install --index-url "https://download.pytorch.org/whl/${TORCH_CU}" torch
 echo "=== 3b · remaining deps (torch already satisfied, kept as-is) ==="
 pip install -r requirements.txt
 pip install "nedb-engine>=11.12.14"   # bundles nedbd-v2, the pgwire endpoint
