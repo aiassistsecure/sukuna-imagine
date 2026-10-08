@@ -404,7 +404,9 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
     out: list[Candidate] = []
     S = schema
 
-    # Find parent-child relationships via foreign keys
+    # Find parent-child relationships via the schema's declared relationships
+    # (name-heuristic matching fails on plural table names, e.g.
+    # "customers" vs "customer_id" -- see predicate_placement_candidates).
     for t in S.tables:
         tq = t.quoted
         cols = t.columns
@@ -412,12 +414,16 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
                    and c.name != "id"]
         # Find tables that reference this one (children)
         children = []
-        for ot in S.tables:
-            if ot == t:
+        for parent_name, child_name, fk_name in S.relationships:
+            if parent_name != t.name:
                 continue
-            for c in ot.columns:
-                if c.name == f"{t.name}_id" or (c.name.endswith("_id") and t.name in c.name):
-                    children.append((ot, c))
+            child = next((ot for ot in S.tables if ot.name == child_name), None)
+            if child is None:
+                continue
+            fk = next((c for c in child.columns if c.name == fk_name), None)
+            if fk is None:
+                continue
+            children.append((child, fk))
                     break
 
         if not children or not numeric:
