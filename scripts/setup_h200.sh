@@ -43,7 +43,7 @@ python -c "import torch; print('torch', torch.__version__, '| cuda:', torch.cuda
 echo "=== 6 · NEDB as the database (no postgres) ==="
 bash scripts/bootstrap_nedb.sh
 
-echo "=== 7 · prove the gate (expect 46/46) ==="
+echo "=== 7 · prove the gate (expect 68/68) ==="
 export STEALTH_DSN="host=127.0.0.1 port=5433 user=stealth dbname=shop"
 python tests/test_gate.py || true
 
@@ -54,8 +54,9 @@ echo "venv    : source $WORK/venv/bin/activate"
 echo "nedb    : pgwire on 127.0.0.1:5433 (log: $WORK/nedb.log)"
 echo "gate DSN: \$STEALTH_DSN (export it in every new shell)"
 echo
-echo "Next up for v10:"
-echo "  1. Generate analytical corpus (see docs/v10-analytical-templates.md)"
+echo "Next up for v11:"
+echo "  1. Forge v11 corpus (analytical + predicate-placement templates)"
+echo "     see docs/v10-analytical-templates.md, docs/v11-predicate-templates.md"
 echo "  2. Validate through gate"
-echo "  3. Train v10 from Interchained/imagine-v9"
-echo "Base checkpoint: https://huggingface.co/Interchained/imagine-v9"
+echo "  3. Train v11 from Interchained/imagine-v10 (two-stage: full FT smoke, then LoRA r16)"
+echo "Base checkpoint: https://huggingface.co/Interchained/imagine-v10"
