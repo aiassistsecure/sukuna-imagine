@@ -90,6 +90,19 @@ class SQLCorpus(Dataset):
         self.rows = []
         skipped_long = skipped_bad = 0
         poisoned = []
+        # Check for a cached tokenized version first
+        import hashlib
+        cache_key = f"{os.path.abspath(path)}:{os.path.getmtime(path)}:{max_len}"
+        cache_name = hashlib.md5(cache_key.encode()).hexdigest()[:16]
+        cache_path = os.path.join(os.path.dirname(path), f".tokenized-{cache_name}.pt")
+        if os.path.exists(cache_path):
+            print(f"  loading cached tokenized dataset from {cache_path}...", flush=True)
+            cached = torch.load(cache_path, weights_only=False)
+            self.rows = cached["rows"]
+            self.skipped_long = cached.get("skipped_long", 0)
+            self.skipped_bad = cached.get("skipped_bad", 0)
+            print(f"  loaded {len(self.rows):,} rows from cache", flush=True)
+            return
         # Count lines first for progress reporting
         with open(path) as f:
             total_lines = sum(1 for _ in f)
@@ -135,6 +148,14 @@ class SQLCorpus(Dataset):
         self.skipped_bad = skipped_bad
         if skipped_long or skipped_bad:
             print(f"  {_yellow('!')} skipped {skipped_long} over-length, {skipped_bad} unusable")
+        # Cache the tokenized rows for reuse across stages
+        print(f"  caching {len(self.rows):,} tokenized rows to {cache_path}...", flush=True)
+        torch.save({
+            "rows": self.rows,
+            "skipped_long": skipped_long,
+            "skipped_bad": skipped_bad,
+        }, cache_path)
+        print(f"  cached.", flush=True)
 
     def __len__(self):
         return len(self.rows)
