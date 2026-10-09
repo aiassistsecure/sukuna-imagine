@@ -90,7 +90,14 @@ class SQLCorpus(Dataset):
         self.rows = []
         skipped_long = skipped_bad = 0
         poisoned = []
+        # Count lines first for progress reporting
+        with open(path) as f:
+            total_lines = sum(1 for _ in f)
+        print(f"  loading {total_lines:,} rows...", flush=True)
         for lineno, line in enumerate(open(path), 1):
+            if lineno % 10000 == 0:
+                print(f"  ... {lineno:,}/{total_lines:,} ({lineno/total_lines:.0%})",
+                      flush=True)
             line = line.strip()
             if not line:
                 continue
