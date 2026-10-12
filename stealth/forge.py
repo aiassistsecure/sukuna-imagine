@@ -409,6 +409,9 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
     # "customers" vs "customer_id" -- see predicate_placement_candidates).
     for t in S.tables:
         tq = t.quoted
+        cols = t.columns
+        numeric = [c for c in cols if any(k in c.type for k in ("int", "numeric", "serial", "real", "double"))
+                   and c.name != "id"]
         # Find tables that reference this one (children)
         children = []
         for parent_name, child_name, fk_name in S.relationships:
@@ -421,66 +424,50 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
             if fk is None:
                 continue
             children.append((child, fk))
+                    break
 
-        if not children:
+        if not children or not numeric:
             continue
 
         child, fk = children[0]
         cq = child.quoted
-        # Parent display column: prefer `name`, else first text column
-        # (patients.full_name, vehicles.plate, hosts.hostname, ...).
-        disp_col = next((c for c in t.columns if c.name == "name"), None)
-        if disp_col is None:
-            disp_col = next((c for c in t.columns if "text" in c.type), None)
-        if disp_col is None:
-            continue
-        dq = disp_col.quoted
-        # Numeric column must come from the CHILD table (it's aliased as c.*).
-        child_numeric = [c for c in child.columns
-                         if any(k in c.type for k in ("int", "numeric", "serial", "real", "double"))
-                         and c.name not in ("id", fk.name)]
-        if not child_numeric:
-            continue
-        num_col = child_numeric[0]
-        # Table names are already plural; singularize for question text.
-        t_sing = t.name[:-3] + "y" if t.name.endswith("ies") else t.name[:-1] if t.name.endswith("s") else t.name
-        c_sing = child.name[:-3] + "y" if child.name.endswith("ies") else child.name[:-1] if child.name.endswith("s") else child.name
+        num_col = numeric[0]
 
         # --- Category 1: Aggregation with LEFT JOIN (the v9 failure mode) ---
         out.append(Candidate(
             S.key,
-            f"List every {t_sing} ID, {disp_col.name}, and total {num_col.name} from {child.name}. Include {t.name} with no {child.name} (show 0). Sort by total descending, then ID ascending.",
-            f"SELECT t.id, t.{dq}, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"List every {t.name} ID, name, and total {num_col.name} from {child.name}. Include {t.name}s with no {child.name}s (show 0). Sort by total descending, then ID ascending.",
+            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
             f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} "
-            f"GROUP BY t.id, t.{dq} ORDER BY total DESC, t.id ASC",
-            f"SELECT t.id, t.{dq}, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"GROUP BY t.id, t.name ORDER BY total DESC, t.id ASC",
+            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
             f"FROM {tq} AS t LEFT JOIN {cq} AS c ON c.{fk.quoted} = t.id "
-            f"GROUP BY t.id, t.{dq} ORDER BY 3 DESC, 1 ASC",
+            f"GROUP BY t.id, t.name ORDER BY 3 DESC, 1 ASC",
             "analytical_left_join_agg", difficulty=5))
 
         # --- Category 2: GROUP BY with HAVING ---
         out.append(Candidate(
             S.key,
-            f"Find {t.name} with more than 2 related {child.name}. Show ID, {disp_col.name}, and count. Sort by count descending.",
-            f"SELECT t.id, t.{dq}, COUNT(c.id) AS cnt FROM {tq} t "
+            f"Find {t.name}s with more than 2 related {child.name}s. Show ID, name, and count. Sort by count descending.",
+            f"SELECT t.id, t.name, COUNT(c.id) AS cnt FROM {tq} t "
             f"JOIN {cq} c ON t.id = c.{fk.quoted} "
-            f"GROUP BY t.id, t.{dq} HAVING COUNT(c.id) > 2 ORDER BY cnt DESC",
-            f"SELECT t.id, t.{dq}, COUNT(*) AS cnt FROM {tq} t, {cq} c "
-            f"WHERE t.id = c.{fk.quoted} GROUP BY t.id, t.{dq} "
+            f"GROUP BY t.id, t.name HAVING COUNT(c.id) > 2 ORDER BY cnt DESC",
+            f"SELECT t.id, t.name, COUNT(*) AS cnt FROM {tq} t, {cq} c "
+            f"WHERE t.id = c.{fk.quoted} GROUP BY t.id, t.name "
             f"HAVING COUNT(*) > 2 ORDER BY 3 DESC",
             "analytical_having", difficulty=5))
 
         # --- Category 3: Subquery comparison ---
-        if len(child_numeric) >= 1:
+        if len(numeric) >= 1:
             out.append(Candidate(
                 S.key,
-                f"Find {t_sing}s whose total {num_col.name} exceeds the average.",
-                f"SELECT id, {disp_col.name}, total FROM (SELECT t.id, t.{dq}, SUM(c.{num_col.quoted}) AS total "
-                f"FROM {tq} t JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.{dq}) sub "
+                f"Find {t.name}s whose total {num_col.name} exceeds the average.",
+                f"SELECT id, name, total FROM (SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total "
+                f"FROM {tq} t JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name) sub "
                 f"WHERE total > (SELECT AVG(total) FROM (SELECT SUM({num_col.quoted}) AS total "
                 f"FROM {cq} GROUP BY {fk.quoted}) avg_sub) ORDER BY total DESC",
-                f"SELECT t.id, t.{dq}, SUM(c.{num_col.quoted}) AS total FROM {tq} t "
-                f"JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.{dq} "
+                f"SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total FROM {tq} t "
+                f"JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name "
                 f"HAVING SUM(c.{num_col.quoted}) > (SELECT AVG(s) FROM "
                 f"(SELECT SUM({num_col.quoted}) AS s FROM {cq} GROUP BY {fk.quoted}) x)",
                 "analytical_subquery", difficulty=6))
