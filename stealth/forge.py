@@ -427,6 +427,14 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
 
         child, fk = children[0]
         cq = child.quoted
+        # Parent display column: prefer `name`, else first text column
+        # (patients.full_name, vehicles.plate, hosts.hostname, ...).
+        disp_col = next((c for c in t.columns if c.name == "name"), None)
+        if disp_col is None:
+            disp_col = next((c for c in t.columns if "text" in c.type), None)
+        if disp_col is None:
+            continue
+        dq = disp_col.quoted
         # Numeric column must come from the CHILD table (it's aliased as c.*).
         child_numeric = [c for c in child.columns
                          if any(k in c.type for k in ("int", "numeric", "serial", "real", "double"))
@@ -441,24 +449,24 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
         # --- Category 1: Aggregation with LEFT JOIN (the v9 failure mode) ---
         out.append(Candidate(
             S.key,
-            f"List every {t_sing} ID, name, and total {num_col.name} from {child.name}. Include {t.name} with no {child.name} (show 0). Sort by total descending, then ID ascending.",
-            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"List every {t_sing} ID, {disp_col.name}, and total {num_col.name} from {child.name}. Include {t.name} with no {child.name} (show 0). Sort by total descending, then ID ascending.",
+            f"SELECT t.id, t.{dq}, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
             f"FROM {tq} t LEFT JOIN {cq} c ON t.id = c.{fk.quoted} "
-            f"GROUP BY t.id, t.name ORDER BY total DESC, t.id ASC",
-            f"SELECT t.id, t.name, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
+            f"GROUP BY t.id, t.{dq} ORDER BY total DESC, t.id ASC",
+            f"SELECT t.id, t.{dq}, COALESCE(SUM(c.{num_col.quoted}), 0) AS total "
             f"FROM {tq} AS t LEFT JOIN {cq} AS c ON c.{fk.quoted} = t.id "
-            f"GROUP BY t.id, t.name ORDER BY 3 DESC, 1 ASC",
+            f"GROUP BY t.id, t.{dq} ORDER BY 3 DESC, 1 ASC",
             "analytical_left_join_agg", difficulty=5))
 
         # --- Category 2: GROUP BY with HAVING ---
         out.append(Candidate(
             S.key,
-            f"Find {t.name} with more than 2 related {child.name}. Show ID, name, and count. Sort by count descending.",
-            f"SELECT t.id, t.name, COUNT(c.id) AS cnt FROM {tq} t "
+            f"Find {t.name} with more than 2 related {child.name}. Show ID, {disp_col.name}, and count. Sort by count descending.",
+            f"SELECT t.id, t.{dq}, COUNT(c.id) AS cnt FROM {tq} t "
             f"JOIN {cq} c ON t.id = c.{fk.quoted} "
-            f"GROUP BY t.id, t.name HAVING COUNT(c.id) > 2 ORDER BY cnt DESC",
-            f"SELECT t.id, t.name, COUNT(*) AS cnt FROM {tq} t, {cq} c "
-            f"WHERE t.id = c.{fk.quoted} GROUP BY t.id, t.name "
+            f"GROUP BY t.id, t.{dq} HAVING COUNT(c.id) > 2 ORDER BY cnt DESC",
+            f"SELECT t.id, t.{dq}, COUNT(*) AS cnt FROM {tq} t, {cq} c "
+            f"WHERE t.id = c.{fk.quoted} GROUP BY t.id, t.{dq} "
             f"HAVING COUNT(*) > 2 ORDER BY 3 DESC",
             "analytical_having", difficulty=5))
 
@@ -467,12 +475,12 @@ def analytical_template_candidates(schema: Schema, rng: random.Random) -> list[C
             out.append(Candidate(
                 S.key,
                 f"Find {t_sing}s whose total {num_col.name} exceeds the average.",
-                f"SELECT id, name, total FROM (SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total "
-                f"FROM {tq} t JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name) sub "
+                f"SELECT id, {disp_col.name}, total FROM (SELECT t.id, t.{dq}, SUM(c.{num_col.quoted}) AS total "
+                f"FROM {tq} t JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.{dq}) sub "
                 f"WHERE total > (SELECT AVG(total) FROM (SELECT SUM({num_col.quoted}) AS total "
                 f"FROM {cq} GROUP BY {fk.quoted}) avg_sub) ORDER BY total DESC",
-                f"SELECT t.id, t.name, SUM(c.{num_col.quoted}) AS total FROM {tq} t "
-                f"JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.name "
+                f"SELECT t.id, t.{dq}, SUM(c.{num_col.quoted}) AS total FROM {tq} t "
+                f"JOIN {cq} c ON t.id = c.{fk.quoted} GROUP BY t.id, t.{dq} "
                 f"HAVING SUM(c.{num_col.quoted}) > (SELECT AVG(s) FROM "
                 f"(SELECT SUM({num_col.quoted}) AS s FROM {cq} GROUP BY {fk.quoted}) x)",
                 "analytical_subquery", difficulty=6))
