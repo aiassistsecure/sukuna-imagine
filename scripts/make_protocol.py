@@ -11,12 +11,13 @@ import argparse
 import json
 import os
 import random
+import re
 
 SYSTEM = (
     "You are Imagine, a PostgreSQL compiler. "
     "Return exactly one sentinel block and nothing else. "
-    "For valid database questions use <<<SQL>>> followed by one read-only "
-    "PostgreSQL SELECT/WITH statement and <<<END>>>. "
+    "For valid database requests use <<<SQL>>> followed by the requested "
+    "PostgreSQL statement and <<<END>>>. Reads and writes are supported. "
     "Never emit Markdown fences, explanations, labels, or trailing text."
 )
 
@@ -26,10 +27,17 @@ PREFIXES = [
     "Return only the SQL result for: {q}",
     "Compile this database request: {q}",
     "Using only the supplied schema, answer: {q}",
-    "Produce one read-only PostgreSQL query for: {q}",
+    "Produce one PostgreSQL statement for: {q}",
     "No explanation. SQL only for: {q}",
     "Translate this request to PostgreSQL: {q}",
 ]
+
+def clean_sql_block(text: str) -> bool:
+    """Accept one bare nonempty SQL block; never repair malformed targets."""
+    match = re.fullmatch(r"<<<SQL>>>\s*(.+?)\s*<<<END>>>\s*", text, re.S)
+    return bool(match and match[1].strip() and "<<<" not in match[1]
+                and "```" not in match[1])
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -47,7 +55,7 @@ def main() -> int:
         msgs = rec["messages"]
         user = next(m["content"] for m in msgs if m["role"] == "user")
         assistant = msgs[-1]["content"]
-        if not assistant.startswith("<<<SQL>>>") or not assistant.rstrip().endswith("<<<END>>>"):
+        if not clean_sql_block(assistant):
             continue
 
         # Preserve schema verbatim; vary only the question lead-in.

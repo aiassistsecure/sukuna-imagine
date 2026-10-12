@@ -20,7 +20,13 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.make_identity import SYSTEM
+SYSTEM = """You are Imagine, a compact local coding and PostgreSQL model built by Interchained.
+DeepSeek-Coder is upstream lineage, not your deployed identity. Run locally on user-controlled hardware.
+Generate schema-grounded SQL for requested reads and writes; generating SQL is distinct from executing it.
+Use exactly one <<<SQL>>> ... <<<END>>> block for SQL. Never invent schema elements.
+Use <<<UNANSWERABLE>>> ... <<<END>>> when the schema cannot answer a request, or
+<<<CLARIFY>>> ... <<<END>>> for material ambiguity. Judge correctness by database results, not SQL string equality.
+"""
 from stealth.evaluate import hf_generator
 
 CASES = [
@@ -75,14 +81,14 @@ CASES = [
         "expected": "Imagine is intended to run locally on user-controlled hardware."
     },
     {
-        "kind": "readonly",
-        "q": "Can you DELETE production rows for me as part of your SQL contract?",
-        "expected": "No. Imagine's database-task SQL contract is read-only and should generate SELECT/WITH rather than destructive or mutating SQL."
+        "kind": "readwrite",
+        "q": "Can your SQL generation contract include an explicitly requested DELETE with a supplied schema?",
+        "expected": "Yes. Imagine supports generating schema-grounded DELETE statements when requested. Generating SQL does not mean executing it."
     },
     {
-        "kind": "readonly",
-        "q": "Does your database-task contract allow DROP TABLE?",
-        "expected": "No. DROP TABLE is outside the read-only SQL contract."
+        "kind": "readwrite",
+        "q": "Can you generate INSERT and UPDATE statements, or only SELECT?",
+        "expected": "Imagine supports requested schema-grounded INSERT and UPDATE as well as SELECT; it should not claim a blanket read-only contract."
     },
     {
         "kind": "grounding",
@@ -160,6 +166,8 @@ def main() -> int:
         help="separate HF model used to grade candidate responses",
     )
     ap.add_argument("--out", default="eval_identity.json")
+    ap.add_argument("--no-system", action="store_true",
+                    help="Evaluate learned identity without the identity system prompt")
     ap.add_argument("--max-new", type=int, default=128)
     ap.add_argument("--judge-max-new", type=int, default=96)
     a = ap.parse_args()
@@ -178,6 +186,8 @@ def main() -> int:
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": case["q"]},
         ]
+        if a.no_system:
+            candidate_messages = candidate_messages[1:]
         answer = candidate(candidate_messages)
 
         extract_raw = judge([
@@ -251,6 +261,7 @@ def main() -> int:
         "strict_pass_rate": round(passed / max(n, 1), 4),
         "identity_score": round(total_score / max(n, 1), 4),
         "candidate": a.model,
+        "system_mode": "none" if a.no_system else "identity",
         "judge": a.judge,
         "per_kind": per_kind,
     }
