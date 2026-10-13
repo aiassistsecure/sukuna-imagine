@@ -1,0 +1,1 @@
+{"error":{"message":"upstream timeout"},"name":"clock.now","originated":"tool","status":"error","tool_call_id":"tc_002"}

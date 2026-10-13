@@ -1,0 +1,3 @@
+<<<UNANSWERABLE>>>
+The shop schema has no column for the capital of France.
+<<<END>>>

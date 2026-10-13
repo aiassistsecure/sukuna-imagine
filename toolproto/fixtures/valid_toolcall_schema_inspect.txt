@@ -1,0 +1,3 @@
+<<<TOOL_CALL>>>
+{"name": "schema.inspect", "arguments": {"scope": "public"}}
+<<<END>>>

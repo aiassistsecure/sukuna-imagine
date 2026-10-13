@@ -1,0 +1,1 @@
+{"name":"clock.now","originated":"tool","result":{"now":"2026-10-13T12:00:00-04:00"},"status":"success"}

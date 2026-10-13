@@ -1,0 +1,3 @@
+<<<SQL>>>
+SELECT name, email FROM customers WHERE city = 'Winter Park';
+<<<END>>>
