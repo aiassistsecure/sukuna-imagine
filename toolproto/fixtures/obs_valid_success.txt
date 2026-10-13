@@ -1,0 +1,1 @@
+{"name":"sql.execute","originated":"tool","result":{"row_count":1,"rows":[{"name":"Ada"}]},"status":"success","tool_call_id":"tc_001"}

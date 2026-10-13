@@ -1,0 +1,6 @@
+<<<SQL>>>
+SELECT 1;
+<<<END>>>
+<<<CLARIFY>>>
+Which one?
+<<<END>>>

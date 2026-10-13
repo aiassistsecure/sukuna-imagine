@@ -1,0 +1,3 @@
+<<<CLARIFY>>>
+Which customers table do you mean: retail or wholesale?
+<<<END>>>

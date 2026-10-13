@@ -1,0 +1,3 @@
+<<<TOOL_CALL>>>
+{"name": "db.drop_table", "arguments": {"table": "customers"}}
+<<<END>>>

@@ -1,0 +1,3 @@
+<<<SQL>>>
+SELECT 1; -- a nested <<<SQL>>> marker here is just data
+<<<END>>>

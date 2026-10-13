@@ -1,0 +1,2 @@
+<<<SQL>>>
+SELECT name FROM customers;

@@ -1,0 +1,1 @@
+{"error":{"message":"conflict"},"name":"sql.execute","originated":"tool","result":{"rows":[]},"status":"success","tool_call_id":"tc_004"}
