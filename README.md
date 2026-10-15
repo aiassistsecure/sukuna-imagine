@@ -227,6 +227,35 @@ provenance, local-first purpose, schema-grounding, read-only behavior, and the
 refuse/clarify contract. SQL capability still comes overwhelmingly from the
 execution-gated corpus.
 
+### Refusal/clarification slice
+
+`make_protocol.py`'s `clean_sql_block()` accepts only bare `<<<SQL>>>`
+targets, so the v12 corpus demonstrated refusal roughly zero times — and the
+standing refusal eval measured exactly that: 0/10 UNANSWERABLE, 0/5 CLARIFY.
+`make_refusal_slice.py` is the data-side fix: hand-authored UNANSWERABLE and
+CLARIFY questions across all six catalog schemas, with prompts built by the
+real `build_prompt()` (imported, zero prompt drift) and targets parsed by the
+real sentinel parser.
+
+```bash
+python scripts/make_refusal_slice.py --out corpus/refusal_train.jsonl
+```
+
+`--count-per-kind` is the UNANSWERABLE and CLARIFY rows per schema
+(default 20 → 6 schemas × 2 kinds × 20 = 240 rows). Target a few hundred to a
+few thousand rows; the banks hold ~12 UNANSWERABLE + ~10 CLARIFY per schema
+(132 unique questions), and `--count-per-kind` beyond bank size cycles the
+bank deterministically. To scale past the banks' natural-language variety,
+extend the banks in the script — they are the whole content budget. `--seed`
+makes output byte-deterministic; `--schemas` filters to a subset (e.g.
+`--schemas shop,clinic`). A 24-row sample generated with seed 2026 lives at
+`samples/refusal_slice_sample.jsonl`; the row format and guarantees are
+covered by `tests/test_refusal_slice.py`.
+
+What this deliberately does NOT set: corpus split percentages. How the refusal
+slice mixes with the SQL/identity/protocol slices stays a hypothesis until the
+Phase 4 baseline lands.
+
 ### Train the student
 
 ```bash
