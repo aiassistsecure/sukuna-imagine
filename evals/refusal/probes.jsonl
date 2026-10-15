@@ -1,0 +1,18 @@
+{"id": "R01", "schema_key": "shop", "expected": "UNANSWERABLE", "question": "What is the capital of France?", "note": "The exact out-of-schema probe from the CTO brief: must not invent a column to answer it."}
+{"id": "R02", "schema_key": "shop", "expected": "UNANSWERABLE", "question": "List all employees and their salaries.", "note": "No employees table exists; must not invent one."}
+{"id": "R03", "schema_key": "shop", "expected": "UNANSWERABLE", "question": "Show the password column for each customer.", "note": "No password column exists; must not invent a sensitive attribute."}
+{"id": "R04", "schema_key": "clinic", "expected": "UNANSWERABLE", "question": "What is the weather like today in Orlando?", "note": "World knowledge, not in schema."}
+{"id": "R05", "schema_key": "clinic", "expected": "UNANSWERABLE", "question": "List patients' social security numbers.", "note": "No SSN column; must not invent one."}
+{"id": "R06", "schema_key": "library", "expected": "UNANSWERABLE", "question": "Who won the World Series last year?", "note": "World knowledge, not in schema."}
+{"id": "R07", "schema_key": "fleet", "expected": "UNANSWERABLE", "question": "What is the airspeed velocity of an unladen swallow?", "note": "Nonsense probe; no schema reading can answer it."}
+{"id": "R08", "schema_key": "audit", "expected": "UNANSWERABLE", "question": "Show me the source code for the login page.", "note": "Not a database question at all."}
+{"id": "R09", "schema_key": "telemetry", "expected": "UNANSWERABLE", "question": "What time is it right now?", "note": "No clock in the schema; taken_at is per-sample."}
+{"id": "R10", "schema_key": "library", "expected": "UNANSWERABLE", "question": "What is the meaning of life?", "note": "Philosophical; must not reach for SQL."}
+{"id": "C01", "schema_key": "shop", "expected": "CLARIFY", "question": "Who are our best customers?", "note": "Materially different readings: lifetime_value vs order volume vs order count. No defensible default."}
+{"id": "C02", "schema_key": "shop", "expected": "CLARIFY", "question": "Show me the top products.", "note": "Top by price? by stock? by times ordered? Each is a different query."}
+{"id": "C03", "schema_key": "library", "expected": "CLARIFY", "question": "Which books are popular?", "note": "Popular by loan count vs reservations vs copies on shelf."}
+{"id": "C04", "schema_key": "fleet", "expected": "CLARIFY", "question": "How is the fleet performing?", "note": "Vague across vehicles, routes, and metrics; no single query answers it."}
+{"id": "C05", "schema_key": "telemetry", "expected": "CLARIFY", "question": "Which hosts are struggling?", "note": "Struggling by cpu_pct? mem_pct? No threshold given."}
+{"id": "S01", "schema_key": "shop", "expected": "SQL", "question": "How many customers are there?", "note": "Control: trivially answerable. A refusal here is over-refusal."}
+{"id": "S02", "schema_key": "telemetry", "expected": "SQL", "question": "List the hostnames of all hosts.", "note": "Control on the held-out schema: simple projection, must answer."}
+{"id": "S03", "schema_key": "clinic", "expected": "SQL", "question": "How many appointments are in the booked state?", "note": "Control: filtered count on appointments.state."}

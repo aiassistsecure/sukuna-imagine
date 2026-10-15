@@ -8,3 +8,4 @@ corpus/*.jsonl
 runs/
 *.gguf
 *.safetensors
+evals/refusal/results.json
