@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -82,8 +83,16 @@ from stealth.schema import check_schema  # noqa: E402
 from stealth.forge import schema_catalog, materialise, _swap_db  # noqa: E402
 from stealth.schemas import CATALOG  # noqa: E402
 
-ADMIN_DSN = "host=127.0.0.1 port=5434 user=stealth dbname=postgres"
-BASE_DSN = "host=127.0.0.1 port=5434 user=stealth"
+# DSNs come from the environment the setup script establishes, never a
+# hardcoded port: ADMIN from STEALTH_ADMIN_DSN, BASE from STEALTH_DSN
+# (its dbname is stripped — callers append the per-schema stealth_<key>
+# database). Defaults match the setup script: NEDB pgwire on 5433,
+# admin against the postgres maintenance database.
+ADMIN_DSN = os.environ.get(
+    "STEALTH_ADMIN_DSN",
+    "host=127.0.0.1 port=5433 user=stealth dbname=postgres")
+BASE_DSN = re.sub(r"\s*dbname=\S+", "", os.environ.get("STEALTH_DSN", "")).strip() \
+    or "host=127.0.0.1 port=5433 user=stealth"
 
 RELAY_RE = re.compile(r'^<<<TOOL_RESULT name="([^"]+)" status="(ok|error)">>>\n(.*)\n<<<END>>>$', re.S)
 WRITE_AUTH_RE = re.compile(r"^<<<SQL>>>\n(.*)\n<<<END>>>\n([^\n]+)$", re.S)
