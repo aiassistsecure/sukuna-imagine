@@ -65,6 +65,11 @@ def main() -> int:
         else:
             schema, question = "", user.strip()
 
+        # Forge-stamped rows carry the granular kind in source_kind (their
+        # kind is the component stamp "sql"); legacy rows carry it in kind.
+        src_meta = rec.get("meta", {})
+        source_kind = src_meta.get("source_kind", src_meta.get("kind"))
+
         choices = PREFIXES[:]
         rng.shuffle(choices)
         for template in choices[:max(1, min(a.copies, len(choices)))]:
@@ -76,7 +81,7 @@ def main() -> int:
                     {"role": "user", "content": content},
                     {"role": "assistant", "content": assistant},
                 ],
-                "meta": {"kind": "protocol", "source_kind": rec.get("meta", {}).get("kind")},
+                "meta": {"kind": "protocol", "source_kind": source_kind},
             })
 
     rng.shuffle(out)
