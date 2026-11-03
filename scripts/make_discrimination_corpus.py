@@ -530,29 +530,44 @@ def generate(count, seed, repo):
     axes = list(AXES)
     rng.shuffle(axes)
     keys = [k for k in TRAIN_KEYS if k in CATALOG]
-    used_prompts = set()
+    # Prompt uniqueness is per axis, within a cycle. An axis's prompt
+    # space is finite -- templated questions over a fixed catalog (~110
+    # to ~172 distinct prompts per axis; the temporal clock question has
+    # only 6 lead-ins x 8 phrases = 48) -- and far smaller than large
+    # counts demand per axis (~1643 pairs at count 9856). When an axis's
+    # space is exhausted, its cycle restarts and prompts may repeat
+    # across cycles; within a cycle uniqueness is strict, and a pair's
+    # two prompts must still differ from each other. An axis whose
+    # builders cannot produce a pair at all still raises after a full
+    # second cycle.
+    used_prompts = {axis: set() for axis in AXES}
     rows = []
     for i in range(count):
         axis = axes[i % len(axes)]
         pair_id = f"disc-{axis}-{i:04d}"
         built = None
-        for attempt in range(200):
-            key = rng.choice(keys)
-            schema = CATALOG[key]
-            table = rng.choice(schema.tables)
-            variant = rng.randrange(100000)
-            try:
-                built = BUILDERS[axis](schema, table, rng, variant, pair_id)
-            except Exception:
-                built = None
-            if not built:
-                continue
-            prompts = [normalize(r["messages"][1]["content"]) for r in built]
-            if len(set(prompts)) != 2 or any(p in used_prompts for p in prompts):
-                built = None
-                continue
-            used_prompts.update(prompts)
-            break
+        for cycle in range(2):
+            for attempt in range(200):
+                key = rng.choice(keys)
+                schema = CATALOG[key]
+                table = rng.choice(schema.tables)
+                variant = rng.randrange(100000)
+                try:
+                    built = BUILDERS[axis](schema, table, rng, variant, pair_id)
+                except Exception:
+                    built = None
+                if not built:
+                    continue
+                prompts = [normalize(r["messages"][1]["content"]) for r in built]
+                if len(set(prompts)) != 2 or any(
+                        p in used_prompts[axis] for p in prompts):
+                    built = None
+                    continue
+                used_prompts[axis].update(prompts)
+                break
+            if built:
+                break
+            used_prompts[axis].clear()
         if not built:
             raise RuntimeError(f"could not build pair {i} (axis={axis})")
         rows.extend(built)

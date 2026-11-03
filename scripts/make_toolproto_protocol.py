@@ -599,28 +599,40 @@ def generate(count, seed, repo):
     shapes = list(SHAPES)
     rng.shuffle(shapes)
     keys = [k for k in TRAIN_KEYS if k in CATALOG]
-    used_prompts = set()
+    # Prompt uniqueness is per shape, within a cycle. A shape's prompt
+    # space is finite -- templated questions over a fixed catalog (the
+    # largest, single_call, has ~155 distinct prompts; chain_2/chain_3
+    # ~66) -- and smaller than large counts demand per shape (~338 at
+    # count 2700). When a shape's space is exhausted, its cycle restarts
+    # and prompts may repeat across cycles; within a cycle uniqueness is
+    # strict. A shape whose builders cannot produce a row at all still
+    # raises after a full second cycle.
+    used_prompts = {shape: set() for shape in SHAPES}
     rows = []
     for i in range(count):
         shape = shapes[i % len(shapes)]
         built = None
-        for attempt in range(300):
-            key = rng.choice(keys)
-            schema = CATALOG[key]
-            table = rng.choice(schema.tables)
-            variant = rng.randrange(100000)
-            try:
-                built = BUILDERS[shape](schema, table, rng, variant)
-            except Exception:
-                built = None
-            if not built:
-                continue
-            prompt = normalize(built["messages"][1]["content"])
-            if prompt in used_prompts:
-                built = None
-                continue
-            used_prompts.add(prompt)
-            break
+        for cycle in range(2):
+            for attempt in range(300):
+                key = rng.choice(keys)
+                schema = CATALOG[key]
+                table = rng.choice(schema.tables)
+                variant = rng.randrange(100000)
+                try:
+                    built = BUILDERS[shape](schema, table, rng, variant)
+                except Exception:
+                    built = None
+                if not built:
+                    continue
+                prompt = normalize(built["messages"][1]["content"])
+                if prompt in used_prompts[shape]:
+                    built = None
+                    continue
+                used_prompts[shape].add(prompt)
+                break
+            if built:
+                break
+            used_prompts[shape].clear()
         if not built:
             raise RuntimeError(f"could not build row {i} (shape={shape})")
         rows.append(built)
