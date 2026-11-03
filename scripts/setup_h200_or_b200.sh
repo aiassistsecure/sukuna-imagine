@@ -62,7 +62,7 @@ echo "=== 6 · NEDB as the database (no postgres) ==="
 bash scripts/bootstrap_nedb.sh
 
 echo "=== 7 · prove the gate (expect 68/68) ==="
-export STEALTH_DSN="host=127.0.0.1 port=5433 user=stealth dbname=shop"
+export STEALTH_DSN="host=127.0.0.1 port=5433 user=stealth dbname=stealth_shop"
 python tests/test_gate.py || true
 
 echo
