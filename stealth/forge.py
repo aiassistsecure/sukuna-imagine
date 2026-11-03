@@ -1155,8 +1155,13 @@ def forge(admin_dsn: str, out_path: str, schema_keys=None, seed: int = 1337,
             f.write(json.dumps({
                 "messages": build_prompt(sch, r["question"], prompt_style) +
                             [{"role": "assistant", "content": wrap(r["sql"])}],
-                "meta": {k: r[k] for k in
-                         ("schema_key", "kind", "difficulty", "rowcount", "result_digest")},
+                # Training rows are kind-stamped "sql" (the v13 base manifest
+                # validates on meta.kind); the candidate's granular kind is
+                # preserved as source_kind, mirroring make_protocol.py.
+                "meta": {"schema_key": r["schema_key"], "kind": "sql",
+                         "source_kind": r["kind"], "difficulty": r["difficulty"],
+                         "rowcount": r["rowcount"],
+                         "result_digest": r["result_digest"]},
             }) + "\n")
 
     if rejects_path:

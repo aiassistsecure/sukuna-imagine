@@ -1067,7 +1067,13 @@ for cat, p, r in final:
 out_path = os.path.join(OUT_DIR, "identity-pairs.jsonl")
 with open(out_path, "w", encoding="utf-8") as f:
     for cat, p, r in final:
-        f.write(json.dumps({"prompt": p, "response": r}, ensure_ascii=False) + "\n")
+        # Chat format, kind-stamped, no system message: identity must work
+        # unprompted, and merge_v13 validates base rows by meta.kind.
+        f.write(json.dumps({
+            "messages": [{"role": "user", "content": p},
+                         {"role": "assistant", "content": r}],
+            "meta": {"kind": "identity"},
+        }, ensure_ascii=False) + "\n")
 print(f"Wrote {out_path}")
 
 # verify round-trip
@@ -1076,7 +1082,9 @@ with open(out_path, encoding="utf-8") as f:
     for i, line in enumerate(f, 1):
         try:
             o = json.loads(line)
-            assert set(o.keys()) == {"prompt", "response"}, f"keys {o.keys()}"
+            assert set(o.keys()) == {"messages", "meta"}, f"keys {o.keys()}"
+            assert [m["role"] for m in o["messages"]] == ["user", "assistant"]
+            assert o["meta"] == {"kind": "identity"}, f"meta {o['meta']}"
         except Exception as e:
             bad += 1
             print(f"line {i}: {e}")

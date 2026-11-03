@@ -1,5 +1,6 @@
 """Dependency-free v12 preparation regressions; no model or database required."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,51 @@ class V12Tests(unittest.TestCase):
             result = subprocess.run([*cmd, '--out', paths[1]], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(len(load(paths[1])), 1)
+
+    def test_identity_generator_emits_chat_rows_with_kind_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, 'HOME': tmp}
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/make_identity_v12.py')],
+                capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = (Path(tmp) / 'workspace' / 'imagine-v12-corpus'
+                   / 'identity-pairs.jsonl')
+            rows = load(str(out))  # merge_v12_corpus.load must accept it
+            self.assertGreaterEqual(len(rows), 1500)
+            for r in rows:
+                self.assertEqual(set(r), {'messages', 'meta'})
+                self.assertEqual([m['role'] for m in r['messages']],
+                                 ['user', 'assistant'])  # no system message
+                self.assertEqual(r['meta'], {'kind': 'identity'})
+
+    def test_protocol_source_kind_prefers_granular_source_kind(self):
+        def src_row(meta):
+            return {'messages': [
+                        {'role': 'user',
+                         'content': 'DDL\n\nQuestion: How many rows are there?'},
+                        {'role': 'assistant',
+                         'content': '<<<SQL>>>\nSELECT 1;\n<<<END>>>'}],
+                    'meta': meta}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / 'sql.jsonl'
+            src.write_text(
+                json.dumps(src_row({'kind': 'sql',
+                                    'source_kind': 'date_range'})) + '\n' +
+                json.dumps(src_row({'kind': 'count_star'})) + '\n',
+                encoding='utf-8')
+            out = root / 'protocol.jsonl'
+            result = subprocess.run(
+                [sys.executable, str(ROOT / 'scripts/make_protocol.py'),
+                 '--source', str(src), '--out', str(out), '--copies', '1'],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(l) for l in out.read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(r['meta']['kind'] == 'protocol' for r in rows))
+            self.assertEqual({r['meta']['source_kind'] for r in rows},
+                             {'date_range', 'count_star'})
 
     def test_invalid_and_empty_input_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
