@@ -4,13 +4,15 @@
 
 | Component | Share | Source |
 |---|---|---|
-| Identity | 33% | `identity-pairs.jsonl` (1,600 pairs, pre-built) |
+| Identity | 33% | Generated via `scripts/make_identity_v12.py` (1,600 pairs) |
 | Protocol | 20% | Generated via `scripts/make_protocol.py` from SQL corpus |
-| SQL | 47% | v11 forge output (`corpus/sql_train.jsonl`) |
+| SQL | 47% | Deterministic forge output (`corpus/sql_train.jsonl`) |
 
 ## Identity corpus
 
-External input specified as **1,600 pairs**. Validate the transferred file before training.
+Generated in-repo by `scripts/make_identity_v12.py`: **1,600 pairs**. It writes
+`~/workspace/imagine-v12-corpus/identity-pairs.jsonl`; copy it to
+`corpus/identity_train.jsonl` (step 5) and validate it before training.
 The planned category counts below total **1,700**, so they are a planning
 breakdown rather than verified counts of that file:
 - Paraphrases (who are you / who made you / what are you): 400
@@ -38,17 +40,21 @@ git checkout main
 # 2. Bootstrap (H200/B200)
 bash scripts/setup_h200_or_b200.sh
 
-# 3. Generate SQL corpus (v11 forge)
-python3 scripts/forge_teacher.py --out corpus/sql_train.jsonl
+# 3. Generate SQL corpus (deterministic forge, teacherless)
+# (export STEALTH_ADMIN_DSN for the local NEDB pgwire first, e.g.
+#  export STEALTH_ADMIN_DSN="host=127.0.0.1 port=5433 user=stealth dbname=stealth_shop")
+PYTHONPATH=. python3 -c "from stealth.forge import forge; import os, json; print(json.dumps(forge(os.environ['STEALTH_ADMIN_DSN'], 'corpus/sql_train.jsonl', rejects_path='corpus/sql_rejects.jsonl'), indent=2))"
+# scripts/forge_teacher.py wraps this same forge with an optional teacher
+# (Devstral) switched on. The teacher layer is unused by v12/v13.
 
 # 4. Generate protocol corpus (20%)
 python3 scripts/make_protocol.py \
     --source corpus/sql_train.jsonl \
     --out corpus/protocol_train.jsonl
 
-# 5. Copy in identity corpus (33%)
-# (transfer identity-pairs.jsonl to the box first)
-cp /path/to/identity-pairs.jsonl corpus/identity_train.jsonl
+# 5. Generate identity corpus (33%)
+python3 scripts/make_identity_v12.py
+cp ~/workspace/imagine-v12-corpus/identity-pairs.jsonl corpus/identity_train.jsonl
 
 # 6. Merge at 33/20/47
 python3 scripts/merge_v12_corpus.py \
@@ -75,6 +81,23 @@ python3 scripts/evaluate_identity.py --model models/imagine-v12/final \
 python3 -m stealth.evaluate --model models/imagine-v12/final --materialise
 ```
 
+## Recreation notes (verified 2026-11-03)
+
+The v12 base was recreated from scratch on a fresh B200 box using the steps
+above. Facts proven by that build:
+
+- The component pools are small by design. The forge admitted 3,284 SQL rows
+  over 5 schemas; the protocol pool is the SQL pool × 8 copies (26,272 rows);
+  the identity pool is 1,600 rows. `merge_v12_corpus.py` repeats the pools in
+  shuffled cycles to fill the 33/20/47 quotas: identity 43,362, protocol
+  26,280, sql 61,758 — total 131,400.
+- Every merged row must carry a `meta.kind` stamp of `identity`, `protocol`,
+  or `sql`; `merge_v13_corpus.py` validates the base corpus by those stamps
+  before merging the v13 families.
+- The v13 family generators (`scripts/make_toolproto_protocol.py`,
+  `scripts/make_discrimination_corpus.py`) complete their full target counts
+  in a single run.
+
 ## Notes
 
 - Base model: `imagine-v11/final` (NOT deepseek-coder — v12 builds on v11)
@@ -93,7 +116,7 @@ omissions, per-kind counts, and identity rows without a system prompt.
 
 Input records must contain nonempty chat messages ending in an assistant target.
 The merger validates structure, not SQL execution correctness or identity facts.
-The externally supplied identity corpus must include system-free examples if
+The identity corpus must include system-free examples if
 unprompted identity is a goal; do not infer learned identity from prompted scores.
 Review imported targets for stale read-only instructions. The current protocol
 generator and identity evaluator support requested reads and writes; older
